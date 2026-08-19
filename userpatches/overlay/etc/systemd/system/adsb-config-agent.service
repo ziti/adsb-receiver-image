@@ -1,0 +1,17 @@
+[Unit]
+Description=Retrieve and apply signed ADS-B receiver configuration
+Wants=network-online.target
+After=network-online.target
+Before=readsb.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/adsb-config-agent fetch
+User=root
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+ReadWritePaths=/var/lib/adsb-receiver /etc/adsb-receiver /etc/systemd/system/adsb-config-refresh.timer.d
+CapabilityBoundingSet=
+SystemCallArchitectures=native

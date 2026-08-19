@@ -1,0 +1,16 @@
+name: build-image
+on:
+  workflow_dispatch:
+jobs:
+  image:
+    runs-on: linux-docker-privileged
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check runner capacity
+        run: |
+          test "$(awk '/MemTotal/ {print int($2/1024/1024)}' /proc/meminfo)" -ge 8
+          test "$(df -BG --output=avail . | tail -1 | tr -dc '0-9')" -ge 50
+          docker info >/dev/null
+      - run: ./build.sh
+      - uses: actions/upload-artifact@v4
+        with: {name: adsb-receiver-images, path: dist/*/*}

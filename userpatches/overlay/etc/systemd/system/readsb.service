@@ -1,0 +1,24 @@
+[Unit]
+Description=ADS-B decoder and forwarder
+Requires=adsb-config-agent.service
+After=adsb-config-agent.service
+ConditionPathExists=/var/lib/adsb-receiver/readsb.args
+StartLimitIntervalSec=5min
+StartLimitBurst=8
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/adsb-readsb
+Restart=on-failure
+RestartSec=15s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+ReadWritePaths=/run/readsb
+DeviceAllow=/dev/bus/usb rwm
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

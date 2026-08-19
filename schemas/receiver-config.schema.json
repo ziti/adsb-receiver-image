@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ADS-B receiver configuration", "type": "object", "required": ["schemaVersion", "receiver", "outputs"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "receiver": {"type": "object", "required": ["id", "latitude", "longitude", "altitudeMeters", "gain"], "properties": {"id": {"type": "string", "minLength": 1}, "latitude": {"type": "number", "minimum": -90, "maximum": 90}, "longitude": {"type": "number", "minimum": -180, "maximum": 180}, "altitudeMeters": {"type": "number", "minimum": -1000, "maximum": 20000}, "gain": {"oneOf": [{"const": "auto"}, {"type": "number"}]} }},
+    "outputs": {"type": "array", "minItems": 1, "items": {"type": "object", "required": ["host", "port", "protocol", "enabled"], "properties": {"host": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$"}, "port": {"type": "integer", "minimum": 1, "maximum": 65535}, "protocol": {"enum": ["beast_reduce_plus_out", "beast_out"]}, "enabled": {"type": "boolean"}}}},
+    "readsb": {"type": "object", "properties": {"extraArgs": {"type": "array", "items": {"type": "string"}}}},
+    "configRefreshSeconds": {"type": "integer", "minimum": 60, "maximum": 86400}
+  }, "additionalProperties": false
+}

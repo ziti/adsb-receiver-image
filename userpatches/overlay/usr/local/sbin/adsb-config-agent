@@ -1,0 +1,116 @@
+#!/usr/bin/python3
+"""Fetch, verify, validate, and atomically apply ADS-B receiver configuration."""
+import argparse, hashlib, json, logging, os, pathlib, re, subprocess, sys, tempfile, time
+from urllib.error import URLError
+from urllib.request import Request, urlopen
+
+ETC = pathlib.Path(os.environ.get("ADSB_ETC", "/etc/adsb-receiver"))
+STATE = pathlib.Path(os.environ.get("ADSB_STATE", "/var/lib/adsb-receiver"))
+SYSTEMD = pathlib.Path(os.environ.get("ADSB_SYSTEMD", "/etc/systemd/system"))
+PUBLIC_KEY = ETC / "publickey.minisign"
+URL_TEMPLATE = ETC / "config-url-template"
+LOG = logging.getLogger("adsb-config-agent")
+PROTOCOLS = {"beast_reduce_plus_out", "beast_out"}
+ARG_ALLOWLIST = {"--fix", "--net-bi-port", "--net-ro-port", "--max-range", "--mlat"}
+
+def atomic_write(path, data, mode=0o600):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".new-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            out.write(data); out.flush(); os.fsync(out.fileno())
+        os.chmod(temporary, mode); os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_DIRECTORY); os.fsync(directory); os.close(directory)
+    finally:
+        if os.path.exists(temporary): os.unlink(temporary)
+
+def receiver_id():
+    explicit = ETC / "receiver-id"
+    if explicit.exists() and explicit.read_text().strip(): return explicit.read_text().strip()
+    for candidate in pathlib.Path("/sys/class/net").glob("*/address"):
+        if candidate.parent.name != "lo":
+            value = candidate.read_text().strip().lower()
+            if re.fullmatch(r"[0-9a-f]{2}(:[0-9a-f]{2}){5}", value): return "mac-" + value.replace(":", "")
+    generated = STATE / "receiver-id"
+    if generated.exists(): return generated.read_text().strip()
+    import uuid
+    value = "uuid-" + str(uuid.uuid4()); atomic_write(generated, (value + "\n").encode()); return value
+
+def validate(config):
+    if not isinstance(config, dict) or config.get("schemaVersion") != 1: raise ValueError("schemaVersion must be 1")
+    receiver = config.get("receiver")
+    if not isinstance(receiver, dict) or not isinstance(receiver.get("id"), str) or not receiver["id"].strip(): raise ValueError("receiver.id is required")
+    for key, low, high in (("latitude", -90, 90), ("longitude", -180, 180), ("altitudeMeters", -1000, 20000)):
+        value = receiver.get(key)
+        if not isinstance(value, (int, float)) or not low <= value <= high: raise ValueError(f"receiver.{key} is out of range")
+    if receiver.get("gain") != "auto" and not isinstance(receiver.get("gain"), (int, float)): raise ValueError("receiver.gain must be auto or numeric")
+    outputs = config.get("outputs")
+    if not isinstance(outputs, list) or not outputs: raise ValueError("at least one output is required")
+    for output in outputs:
+        if not isinstance(output, dict) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}", str(output.get("host", ""))): raise ValueError("invalid output host")
+        if not isinstance(output.get("port"), int) or not 1 <= output["port"] <= 65535: raise ValueError("invalid output port")
+        if output.get("protocol") not in PROTOCOLS: raise ValueError("invalid output protocol")
+    for arg in config.get("readsb", {}).get("extraArgs", []):
+        if not isinstance(arg, str) or arg.split("=", 1)[0] not in ARG_ALLOWLIST: raise ValueError("readsb extraArgs contains a prohibited option")
+    interval = config.get("configRefreshSeconds", 900)
+    if not isinstance(interval, int) or not 60 <= interval <= 86400: raise ValueError("configRefreshSeconds must be 60..86400")
+    return config
+
+def verify(config_path, signature_path):
+    result = subprocess.run(["minisign", "-Vm", str(config_path), "-x", str(signature_path), "-P", PUBLIC_KEY.read_text().strip().splitlines()[-1]], capture_output=True, text=True)
+    if result.returncode: raise ValueError("minisign verification failed: " + result.stderr.strip())
+
+def render_args(config):
+    receiver = config["receiver"]
+    args = ["--quiet", "--net", "--device-type", "rtlsdr", "--lat", str(receiver["latitude"]), "--lon", str(receiver["longitude"]), "--alt", str(receiver["altitudeMeters"]), "--gain", str(receiver["gain"])]
+    for output in config["outputs"]:
+        if output.get("enabled", True): args += ["--net-connector", f"{output['host']},{output['port']},{output['protocol']}"]
+    args += config.get("readsb", {}).get("extraArgs", [])
+    return "\n".join(args) + "\n"
+
+def configure_refresh_timer(seconds):
+    drop_in = SYSTEMD / "adsb-config-refresh.timer.d/override.conf"
+    atomic_write(drop_in, ("[Timer]\nOnUnitActiveSec=" + str(seconds) + "s\n").encode(), 0o644)
+    subprocess.run(["systemctl", "daemon-reload"], check=False)
+    subprocess.run(["systemctl", "try-restart", "adsb-config-refresh.timer"], check=False)
+
+def apply(config_path, signature_path=None):
+    raw = config_path.read_bytes()
+    config = validate(json.loads(raw))
+    if signature_path: verify(config_path, signature_path)
+    rendered = render_args(config).encode(); digest = hashlib.sha256(rendered).hexdigest()
+    old = (STATE / "effective.sha256").read_text().strip() if (STATE / "effective.sha256").exists() else ""
+    if digest == old: return False
+    active = STATE / "active.json"
+    if active.exists(): atomic_write(STATE / "previous.json", active.read_bytes())
+    atomic_write(active, raw); atomic_write(STATE / "effective.sha256", (digest + "\n").encode())
+    atomic_write(STATE / "readsb.args", rendered, 0o644)
+    configure_refresh_timer(config.get("configRefreshSeconds", 900))
+    subprocess.run(["systemctl", "try-restart", "readsb.service"], check=False)
+    return True
+
+def fetch():
+    url = URL_TEMPLATE.read_text().strip().replace("{receiver_id}", receiver_id())
+    request = Request(url, headers={"User-Agent": "adsb-config-agent/1"})
+    with tempfile.TemporaryDirectory(dir=STATE) as tempdir:
+        config_path = pathlib.Path(tempdir) / "config.json"; signature_path = pathlib.Path(tempdir) / "config.json.minisig"
+        try:
+            with urlopen(request, timeout=20) as response: config_path.write_bytes(response.read())
+            with urlopen(Request(url + ".minisig"), timeout=20) as response: signature_path.write_bytes(response.read())
+        except URLError as error: raise RuntimeError("configuration server unavailable: " + str(error))
+        return apply(config_path, signature_path)
+
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(name)s: %(levelname)s: %(message)s")
+    parser = argparse.ArgumentParser(); parser.add_argument("command", choices=("fetch", "validate", "apply", "status")); parser.add_argument("file", nargs="?"); args = parser.parse_args()
+    if args.command == "status":
+        print((ETC / "../adsb-receiver-release").resolve().read_text() if (ETC / "../adsb-receiver-release").exists() else "release metadata unavailable")
+        print("receiver_id=" + receiver_id()); print("active=" + str((STATE / "active.json").exists())); return
+    if not args.file and args.command != "fetch": parser.error("FILE is required")
+    if args.command == "validate": validate(json.loads(pathlib.Path(args.file).read_bytes()))
+    elif args.command == "apply": apply(pathlib.Path(args.file))
+    else: fetch()
+
+if __name__ == "__main__":
+    try: main()
+    except Exception as error: LOG.error("%s", error); sys.exit(1)

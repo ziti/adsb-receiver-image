@@ -1,0 +1,7 @@
+#!/usr/bin/python3
+"""Execute readsb with the validated, line-oriented argument file."""
+import os
+from pathlib import Path
+
+arguments = Path("/var/lib/adsb-receiver/readsb.args").read_text(encoding="utf-8").splitlines()
+os.execv("/usr/bin/readsb", ["readsb", *arguments])

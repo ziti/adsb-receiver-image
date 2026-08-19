@@ -1,0 +1,11 @@
+services:
+  config-server:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    ports: ["443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./config:/srv/config:ro
+      - caddy-data:/data
+volumes:
+  caddy-data:

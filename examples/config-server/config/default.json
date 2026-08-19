@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "receiver": {"id": "example-receiver", "latitude": 41.8781, "longitude": -87.6298, "altitudeMeters": 181, "gain": "auto"},
+  "readsb": {"extraArgs": []},
+  "outputs": [{"host": "adsb-server.example.internal", "port": 30004, "protocol": "beast_reduce_plus_out", "enabled": true}],
+  "configRefreshSeconds": 900
+}

@@ -1,0 +1,8 @@
+.armbian-build/
+dist/*
+!dist/.gitkeep
+graphify-out/
+__pycache__/
+.pytest_cache/
+config/authorized_keys
+.serena/

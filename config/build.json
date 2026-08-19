@@ -1,0 +1,20 @@
+{
+  "imageVersion": "2026.08.19.1",
+  "armbian": {
+    "repository": "https://github.com/armbian/build.git",
+    "revision": "v26.5.1",
+    "release": "trixie",
+    "branch": "current"
+  },
+  "readsb": {
+    "repository": "https://github.com/wiedehopf/readsb.git",
+    "revision": "d9a4c62655490e70d07704e207738bb9c6cffde1"
+  },
+  "defaults": {
+    "adminUser": "admin",
+    "timezone": "America/Chicago",
+    "locale": "C.UTF-8",
+    "configUrlTemplate": "https://example.internal/adsb/config/{receiver_id}.json",
+    "sshAuthorizedKeysFile": "config/authorized_keys"
+  }
+}
