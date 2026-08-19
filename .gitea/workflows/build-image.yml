@@ -18,6 +18,18 @@ jobs:
           test -n "$ADSB_ADMIN_AUTHORIZED_KEYS"
           umask 077
           printf '%s\n' "$ADSB_ADMIN_AUTHORIZED_KEYS" > config/authorized_keys
-      - run: ./build.sh
+      - name: Build as an unprivileged user
+        run: |
+          test -S /var/run/docker.sock
+          useradd --create-home --shell /bin/bash builder
+          docker_socket_gid="$(stat -c '%g' /var/run/docker.sock)"
+          docker_socket_group="$(getent group "$docker_socket_gid" | cut -d: -f1)"
+          if [ -z "$docker_socket_group" ]; then
+            docker_socket_group=docker-socket
+            groupadd --gid "$docker_socket_gid" "$docker_socket_group"
+          fi
+          usermod --append --groups "$docker_socket_group" builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          runuser -u builder -- bash -lc 'cd "$GITHUB_WORKSPACE" && ./build.sh'
       - uses: actions/upload-artifact@v4
         with: {name: adsb-receiver-images, path: dist/*/*}

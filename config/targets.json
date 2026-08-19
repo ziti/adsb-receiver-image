@@ -5,6 +5,10 @@
       "board": "orangepizero3",
       "displayName": "Orange Pi Zero 3",
       "architecture": "arm64",
+      "armbian": {
+        "branch": "current",
+        "kernelRevision": "bf3be28f6721e24961992ebb9e61c0cf21a56806"
+      },
       "minimumHardware": {
         "ramMiB": 1024,
         "storageGiB": 8,
@@ -15,4 +19,3 @@
     }
   }
 }
-

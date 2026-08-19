@@ -61,11 +61,14 @@ Fish users can run those commands unchanged. `build.sh` declares Bash itself,
 so do not source it into Fish. A native macOS build is unsupported: use a
 Linux VM, a dedicated Linux host, or the privileged Gitea runner instead.
 
-The build pins Armbian `v26.5.1`, Debian `trixie`, and readsb commit
-`d9a4c62655490e70d07704e207738bb9c6cffde1` in `config/build.json`. The build
-uses readsb's supported Debian package path with RTL-SDR support, so it never
-compiles on normal device boot. Each artifact directory contains an `.img.xz`,
-SHA-256 checksum, and a build manifest.
+The build pins the Armbian framework to commit
+`9de7be05323564424cf64171cb483712ec356bc1`, Debian `trixie`, and readsb commit
+`d9a4c62655490e70d07704e207738bb9c6cffde1` in `config/build.json`. Each target
+also pins its kernel commit in `config/targets.json`; this avoids a build
+silently selecting a newer rolling stable-kernel revision than the framework's
+patch stack supports. The build uses readsb's supported Debian package path with
+RTL-SDR support, so it never compiles on normal device boot. Each artifact
+directory contains an `.img.xz`, SHA-256 checksum, and a build manifest.
 
 Before a production build, replace the example public key at
 `userpatches/overlay/etc/adsb-receiver/publickey.minisign`, set the URL template,
@@ -99,7 +102,9 @@ and build artifacts. The Caddy example merely serves already signed static files
 
 `.gitea/workflows/validate.yml` runs shell, JSON, unit, and simple secret checks.
 `.gitea/workflows/build-image.yml` is manual and requires a privileged Linux
-Docker runner with at least 8 GiB RAM and 50 GiB free. It intentionally does not
+Docker runner with at least 8 GiB RAM and 50 GiB free. The workflow creates an
+ephemeral unprivileged builder user with access to the mounted Docker socket,
+because Armbian must not run `compile.sh` as root. It intentionally does not
 build an Armbian image for every push.
 
 To recover: download a known image, verify its SHA-256, flash it, connect Ethernet

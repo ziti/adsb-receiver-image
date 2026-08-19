@@ -2,9 +2,8 @@
   "imageVersion": "2026.08.19.1",
   "armbian": {
     "repository": "https://github.com/armbian/build.git",
-    "revision": "v26.5.1",
-    "release": "trixie",
-    "branch": "current"
+    "revision": "9de7be05323564424cf64171cb483712ec356bc1",
+    "release": "trixie"
   },
   "readsb": {
     "repository": "https://github.com/wiedehopf/readsb.git",

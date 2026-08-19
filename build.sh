@@ -57,7 +57,8 @@ for target in "${build_targets[@]}"; do
   board=$(jq -er --arg target "$target" '.targets[$target].board' "$targets_config")
   arch=$(jq -er --arg target "$target" '.targets[$target].architecture' "$targets_config")
   release=$(jq -er '.armbian.release' "$build_config")
-  branch=$(jq -er '.armbian.branch' "$build_config")
+  branch=$(jq -er --arg target "$target" '.targets[$target].armbian.branch' "$targets_config")
+  kernel_revision=$(jq -er --arg target "$target" '.targets[$target].armbian.kernelRevision' "$targets_config")
   target_dir="$dist_dir/$target"
   rm -rf "$target_dir"
   mkdir -p "$target_dir"
@@ -68,7 +69,7 @@ for target in "${build_targets[@]}"; do
     ADSB_TARGET="$target" ADSB_TARGET_ARCH="$arch" ADSB_READSB_REVISION="$(jq -er '.readsb.revision' "$build_config")" \
     ADSB_CONFIG_URL_TEMPLATE="$(jq -er '.defaults.configUrlTemplate' "$build_config")" \
     "$armbian_dir/compile.sh" \
-      BOARD="$board" BRANCH="$branch" RELEASE="$release" BUILD_MINIMAL=yes BUILD_DESKTOP=no \
+      BOARD="$board" BRANCH="$branch" RELEASE="$release" KERNELBRANCH="commit:$kernel_revision" BUILD_MINIMAL=yes BUILD_DESKTOP=no \
       KERNEL_CONFIGURE=no CLEAN_LEVEL=make,oldcache
   images=()
   while IFS= read -r candidate; do
@@ -81,6 +82,6 @@ for target in "${build_targets[@]}"; do
   cp "${images[0]}" "$image"
   xz -T0 -9e "$image"
   sha256sum "${image}.xz" > "${image}.xz.sha256"
-  jq -n --arg target "$target" --arg board "$board" --arg arch "$arch" --arg version "$image_version" --arg git "$git_commit" --arg armbian "$armbian_revision" --arg release "$release" \
-    '{target:$target,board:$board,architecture:$arch,imageVersion:$version,repositoryCommit:$git,armbianRevision:$armbian,debianRelease:$release}' > "$target_dir/build-manifest.json"
+  jq -n --arg target "$target" --arg board "$board" --arg arch "$arch" --arg version "$image_version" --arg git "$git_commit" --arg armbian "$armbian_revision" --arg kernel "$kernel_revision" --arg release "$release" \
+    '{target:$target,board:$board,architecture:$arch,imageVersion:$version,repositoryCommit:$git,armbianRevision:$armbian,kernelRevision:$kernel,debianRelease:$release}' > "$target_dir/build-manifest.json"
 done
