@@ -6,3 +6,5 @@ __pycache__/
 .pytest_cache/
 config/authorized_keys
 .serena/
+userpatches/overlay/etc/adsb-receiver/adsb-config.key
+userpatches/overlay/etc/adsb-receiver/adsb-config.pub
