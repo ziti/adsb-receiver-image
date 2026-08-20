@@ -80,8 +80,10 @@ Linux VM or dedicated Linux host when the GitHub Actions build is unavailable.
 For local fallback builds, `build.sh` pins the Armbian framework, Debian `trixie`,
 and readsb commit in `config/build.json`. The authoritative build path is GitHub
 Actions, which pins the official `armbian/build` action and framework to
-`8de11a017f7f05a82c77850f8322928cb6a3b70c`. That exact upstream commit's
-`VERSION` file is `26.05.0-trunk`; the commit is the authoritative identifier.
+`0620eb67885d19aeabd62655e60870ffd1efad63`. That exact upstream commit's
+`VERSION` file is `26.08.0-trunk`; the commit is the authoritative identifier.
+This revision removes three sunxi 6.18 patches that are already present in the
+target's pinned kernel commit, so the framework and kernel patch set agree.
 The action copies this repository's `userpatches/` into Armbian using its
 standard mechanism.
 Each successful build publishes a compressed `.img.xz` and checksum in a GitHub

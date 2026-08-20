@@ -2,7 +2,7 @@
   "imageVersion": "2026.08.19.1",
   "armbian": {
     "repository": "https://github.com/armbian/build.git",
-    "revision": "8de11a017f7f05a82c77850f8322928cb6a3b70c",
+    "revision": "0620eb67885d19aeabd62655e60870ffd1efad63",
     "release": "trixie"
   },
   "readsb": {

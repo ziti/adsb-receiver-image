@@ -215,10 +215,15 @@ def main() -> None:
             if "@" not in reference or not SHA.fullmatch(reference.rsplit("@", 1)[1]):
                 fail(f"{workflow.relative_to(ROOT)} contains a floating action reference: {reference}")
     build_workflow = (workflows / "build-image.yml").read_text()
-    if "armbian/build@8de11a017f7f05a82c77850f8322928cb6a3b70c" not in build_workflow:
+    if f"armbian/build@{armbian['revision']}" not in build_workflow:
         fail("build workflow must pin the official Armbian action revision")
-    if armbian["revision"] not in build_workflow:
-        fail("config/build.json Armbian revision must match the pinned build workflow")
+    for required_reference in (
+        f"ARMBIAN_ACTION_REVISION: {armbian['revision']}",
+        f"ADSB_ARMBIAN_REVISION: {armbian['revision']}",
+        f"armbian_branch: {armbian['revision']}",
+    ):
+        if required_reference not in build_workflow:
+            fail("config/build.json Armbian revision must match every build workflow reference")
     if "armbian_version:" in build_workflow:
         fail("appliance image_version must not be passed to armbian_version")
     if "armbian_extensions: adsb-kernel-pin" not in build_workflow:
