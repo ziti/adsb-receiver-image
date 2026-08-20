@@ -23,7 +23,7 @@ jobs:
           test -S /var/run/docker.sock
           useradd --create-home --shell /bin/bash builder
           docker_socket_gid="$(stat -c '%g' /var/run/docker.sock)"
-          docker_socket_group="$(getent group "$docker_socket_gid" | cut -d: -f1)"
+          docker_socket_group="$(getent group "$docker_socket_gid" 2>/dev/null | cut -d: -f1 || true)"
           if [ -z "$docker_socket_group" ]; then
             docker_socket_group=docker-socket
             groupadd --gid "$docker_socket_gid" "$docker_socket_group"
