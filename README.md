@@ -64,11 +64,30 @@ Linux VM or dedicated Linux host when the GitHub Actions build is unavailable.
 For local fallback builds, `build.sh` pins the Armbian framework, Debian `trixie`,
 and readsb commit in `config/build.json`. The authoritative build path is GitHub
 Actions, which pins the official `armbian/build` action and framework to
-`8de11a017f7f05a82c77850f8322928cb6a3b70c` (Armbian v26.5.1). The action copies
-this repository's `userpatches/` into Armbian using its standard mechanism.
+`8de11a017f7f05a82c77850f8322928cb6a3b70c`. That exact upstream commit's
+`VERSION` file is `26.05.0-trunk`; the commit is the authoritative identifier.
+The action copies this repository's `userpatches/` into Armbian using its
+standard mechanism.
 Each successful build publishes a compressed `.img.xz` and checksum in a GitHub
 Release, plus a workflow artifact containing the target snapshot, build manifest,
-and Armbian `output/info/git_sources.json` source-resolution metadata.
+and all available Armbian `output/info/` source metadata. A normal image build
+does not guarantee `git_sources.json`: the pinned framework writes it during
+`artifact-config-dump-json` branch resolution. Its absence is recorded in the
+build manifest instead of failing an otherwise valid image build.
+
+The appliance release version (for example `2026.08.20.1`) is separate from
+Armbian's internal image revision. The manual workflow uses the appliance
+version for `/etc/adsb-receiver-release`, the GitHub Release tag/title, artifact
+name, and build manifest. It deliberately leaves `armbian_version` unset so the
+official Action resolves and increments its own supported three-part revision.
+
+`config/targets.json` is also the single source of truth for each target kernel
+commit. The workflow exports that target's `kernelRevision` as
+`ADSB_KERNEL_REVISION` and enables `userpatches/extensions/adsb-kernel-pin.sh`.
+Armbian runs its supported `late_family_config` hook before resolving sources;
+the extension sets `KERNELBRANCH=commit:<kernelRevision>`. The official Action
+still receives `armbian_kernel_branch: current` for the board's high-level kernel
+classification, but kernel checkout is pinned to the declarative target commit.
 
 Before a production build, replace the example public key at
 `userpatches/overlay/etc/adsb-receiver/publickey.minisign`, set the URL template,

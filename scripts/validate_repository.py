@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 from jsonschema import Draft202012Validator
 
@@ -25,6 +26,8 @@ TOKEN = re.compile(
     r"(?:" + "github" + r"_pat_|" + "gh" + r"p_|" + "gl" + r"pat-|gitea[_-]?token\s*[:=])",
     re.IGNORECASE,
 )
+PLACEHOLDER_PUBLIC_KEY_COMMENT = "Replace this example key before a production build"
+PLACEHOLDER_PUBLIC_KEY = "RWQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
 
 def fail(message: str) -> None:
@@ -78,9 +81,25 @@ def validate_systemd_units() -> None:
                 fail(f"timer lacks Install/WantedBy: {unit_path.relative_to(ROOT)}")
 
 
+def production_placeholders(build: object) -> list[str]:
+    defaults = build.get("defaults", {}) if isinstance(build, dict) else {}
+    config_url = defaults.get("configUrlTemplate", "")
+    hostname = (urlparse(config_url).hostname or "").lower()
+    placeholder_hosts = {"config.example.invalid", "example.invalid", "example.com", "example.org", "example.net"}
+    findings = []
+    if hostname in placeholder_hosts or hostname.endswith(".example.invalid"):
+        findings.append(f"configuration URL is a placeholder: {config_url}")
+
+    public_key = (ROOT / "userpatches/overlay/etc/adsb-receiver/publickey.minisign").read_text()
+    if PLACEHOLDER_PUBLIC_KEY_COMMENT in public_key or PLACEHOLDER_PUBLIC_KEY in public_key:
+        findings.append("Minisign public key is the committed example placeholder")
+    return findings
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--target")
+    parser.add_argument("--production", action="store_true", help="reject deployment placeholders")
     args = parser.parse_args()
 
     build = load_json("config/build.json")
@@ -131,6 +150,13 @@ def main() -> None:
         fail("this appliance currently supports only the validated Debian trixie release")
     validate_systemd_units()
 
+    placeholders = production_placeholders(build)
+    if placeholders:
+        message = "; ".join(placeholders)
+        if args.production:
+            fail(f"production build blocked: {message}")
+        print(f"warning: production build remains blocked: {message}", file=sys.stderr)
+
     workflows = ROOT / ".github" / "workflows"
     for workflow in workflows.glob("*.yml"):
         for line in workflow.read_text().splitlines():
@@ -144,6 +170,15 @@ def main() -> None:
         fail("build workflow must pin the official Armbian action revision")
     if armbian["revision"] not in build_workflow:
         fail("config/build.json Armbian revision must match the pinned build workflow")
+    if "armbian_version:" in build_workflow:
+        fail("appliance image_version must not be passed to armbian_version")
+    if "armbian_extensions: adsb-kernel-pin" not in build_workflow:
+        fail("build workflow must enable the ADS-B kernel-pin Armbian extension")
+    kernel_pin_extension = ROOT / "userpatches/extensions/adsb-kernel-pin.sh"
+    if not kernel_pin_extension.is_file() or 'KERNELBRANCH="commit:${ADSB_KERNEL_REVISION}"' not in kernel_pin_extension.read_text():
+        fail("kernel-pin extension must set KERNELBRANCH from ADSB_KERNEL_REVISION")
+    if "ADSB_KERNEL_REVISION={target['armbian']['kernelRevision']}" not in build_workflow:
+        fail("build workflow must derive ADSB_KERNEL_REVISION from config/targets.json")
     if (ROOT / ".gitea" / "workflows" / "build-image.yml").exists():
         fail("obsolete Gitea image-build workflow is still enabled")
 

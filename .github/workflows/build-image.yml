@@ -13,8 +13,8 @@ permissions:
   contents: write
 
 env:
-  # Armbian v26.5.1. This pins both the invoked action and the framework it
-  # checks out internally, rather than relying on a moving branch.
+  # Exact Armbian action/framework revision. Its VERSION file reports
+  # 26.05.0-trunk; the commit is the authoritative identifier.
   ARMBIAN_ACTION_REVISION: 8de11a017f7f05a82c77850f8322928cb6a3b70c
 
 jobs:
@@ -46,10 +46,15 @@ jobs:
       - name: Check out source for metadata
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12.11'
+
       - name: Validate the selected target
         run: |
-          python3 -m pip install --user 'jsonschema==4.25.1'
-          python3 scripts/validate_repository.py --target "${{ matrix.target }}"
+          python -m pip install 'jsonschema==4.25.1'
+          python scripts/validate_repository.py --production --target "${{ matrix.target }}"
           test -n "$ADSB_ADMIN_AUTHORIZED_KEYS" || {
             echo 'Missing required ADSB_ADMIN_AUTHORIZED_KEYS repository secret.' >&2
             exit 1
@@ -57,17 +62,19 @@ jobs:
 
       - name: Load build configuration
         run: |
-          python3 - <<'PY' >> "$GITHUB_ENV"
+          python - <<'PY' >> "$GITHUB_ENV"
           import json
           from pathlib import Path
 
           build = json.loads(Path("config/build.json").read_text())
+          target = json.loads(Path("config/targets.json").read_text())["targets"]["${{ matrix.target }}"]
           print(f"ADSB_READSB_REVISION={build['readsb']['revision']}")
           print(f"ADSB_CONFIG_URL_TEMPLATE={build['defaults']['configUrlTemplate']}")
+          print(f"ADSB_KERNEL_REVISION={target['armbian']['kernelRevision']}")
           PY
 
       - name: Build and release with Armbian
-        uses: armbian/build@8de11a017f7f05a82c77850f8322928cb6a3b70c # v26.5.1
+        uses: armbian/build@8de11a017f7f05a82c77850f8322928cb6a3b70c # exact framework/action revision
         with:
           armbian_token: ${{ github.token }}
           armbian_branch: 8de11a017f7f05a82c77850f8322928cb6a3b70c
@@ -77,13 +84,13 @@ jobs:
           armbian_target: build
           armbian_ui: minimal
           armbian_compress: sha,img,xz
-          armbian_version: ${{ inputs.image_version }}
+          armbian_extensions: adsb-kernel-pin
           armbian_release_tag: ${{ inputs.image_version }}
           armbian_release_title: ADS-B receiver image ${{ inputs.image_version }}
           armbian_release_body: |
             Reproducible minimal Armbian-based ADS-B receiver image.
             Target: ${{ matrix.target }} (${{ matrix.board }}, ${{ matrix.architecture }}).
-            Framework/action revision: 8de11a017f7f05a82c77850f8322928cb6a3b70c (v26.5.1).
+            Framework/action revision: 8de11a017f7f05a82c77850f8322928cb6a3b70c.
           armbian_runner_clean: yes
           armbian_download_repository: ''
           armbian_index_url: ''
@@ -95,9 +102,17 @@ jobs:
           metadata_dir="build/output/adsb-metadata/${{ matrix.target }}"
           mkdir -p "$metadata_dir"
           cp config/build.json config/targets.json "$metadata_dir/"
-          cp build/output/info/git_sources.json "$metadata_dir/git_sources.json"
+          if [[ -d build/output/info ]]; then
+            mkdir -p "$metadata_dir/armbian-info"
+            cp -a build/output/info/. "$metadata_dir/armbian-info/"
+          fi
+          if [[ -s "$metadata_dir/armbian-info/git_sources.json" ]]; then
+            git_sources_metadata=present
+          else
+            git_sources_metadata=not-generated-by-image-build
+          fi
           sha256sum build/output/images/*.img.xz > "$metadata_dir/image-sha256sums.txt"
-          python3 - "$metadata_dir/build-manifest.json" <<'PY'
+          GIT_SOURCES_METADATA="$git_sources_metadata" python - "$metadata_dir/build-manifest.json" <<'PY'
           import json
           import os
           import sys
@@ -115,7 +130,10 @@ jobs:
               "armbian": {
                   "actionRevision": os.environ["ARMBIAN_ACTION_REVISION"],
                   "frameworkRevision": os.environ["ADSB_ARMBIAN_REVISION"],
-                  "version": "v26.5.1",
+                  "versionFile": "26.05.0-trunk",
+                  "kernelBranchClass": "current",
+                  "kernelRevision": os.environ["ADSB_KERNEL_REVISION"],
+                  "gitSourcesMetadata": os.environ["GIT_SOURCES_METADATA"],
               },
           }
           Path(sys.argv[1]).write_text(json.dumps(manifest, indent=2) + "\n")
