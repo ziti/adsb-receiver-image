@@ -1,8 +1,8 @@
-# Stateless ADS-B receiver image
+# Reproducible ADS-B receiver appliance image
 
-This repository builds a small, reproducible, appliance-style Debian image for
-RTL-SDR ADS-B reception. It starts with the Orange Pi Zero 3 and the official
-Armbian build framework, not a prebuilt feeder image. The receiver decodes
+This repository builds a reproducible, minimal, Armbian-based ADS-B edge
+receiver appliance for RTL-SDR reception. It starts with the Orange Pi Zero 3
+and the official Armbian build framework, not a prebuilt feeder image. The receiver decodes
 locally with Wiedehopf's `readsb` and forwards Beast data to the central ADS-B
 server. It contains no UI, database, dashboard, Docker daemon, history, or
 general-purpose feeder stack. That stuff belongs at the center where it can be
@@ -17,7 +17,7 @@ image per board without cross-contaminating names or manifests.
 
 | Target | Build board | Absolute minimum | Practical recommendation |
 | --- | --- | --- | --- |
-| Orange Pi Zero 3 | `orangepizero3` | 1 GiB RAM, 8 GiB SD card, Ethernet, one USB host port | 2 GiB RAM, 16 GiB high-endurance SD card, RTL-SDR Blog V3 or equivalent |
+| Orange Pi Zero 3 | `orangepizero3` | Estimated: 1 GiB RAM, 8 GiB SD card, Ethernet, one USB host port | Estimated: 2 GiB RAM, 16 GiB high-endurance SD card, RTL-SDR Blog V3 or equivalent |
 
 For a future device, add a target with its Armbian `BOARD` name, architecture,
 and `minimumHardware`. As a planning floor, do not add a receiver below 1 GiB
@@ -59,16 +59,16 @@ but use a Linux runner or VM for the actual image build.
 
 Fish users can run those commands unchanged. `build.sh` declares Bash itself,
 so do not source it into Fish. A native macOS build is unsupported: use a
-Linux VM, a dedicated Linux host, or the privileged Gitea runner instead.
+Linux VM or dedicated Linux host when the GitHub Actions build is unavailable.
 
-The build pins the Armbian framework to commit
-`9de7be05323564424cf64171cb483712ec356bc1`, Debian `trixie`, and readsb commit
-`d9a4c62655490e70d07704e207738bb9c6cffde1` in `config/build.json`. Each target
-also pins its kernel commit in `config/targets.json`; this avoids a build
-silently selecting a newer rolling stable-kernel revision than the framework's
-patch stack supports. The build uses readsb's supported Debian package path with
-RTL-SDR support, so it never compiles on normal device boot. Each artifact
-directory contains an `.img.xz`, SHA-256 checksum, and a build manifest.
+For local fallback builds, `build.sh` pins the Armbian framework, Debian `trixie`,
+and readsb commit in `config/build.json`. The authoritative build path is GitHub
+Actions, which pins the official `armbian/build` action and framework to
+`8de11a017f7f05a82c77850f8322928cb6a3b70c` (Armbian v26.5.1). The action copies
+this repository's `userpatches/` into Armbian using its standard mechanism.
+Each successful build publishes a compressed `.img.xz` and checksum in a GitHub
+Release, plus a workflow artifact containing the target snapshot, build manifest,
+and Armbian `output/info/git_sources.json` source-resolution metadata.
 
 Before a production build, replace the example public key at
 `userpatches/overlay/etc/adsb-receiver/publickey.minisign`, set the URL template,
@@ -98,18 +98,34 @@ examples/config-server/scripts/sign-config.sh receiver-config.key config/receive
 Keep `receiver-config.key` off the image, repository, Caddy container, CI logs,
 and build artifacts. The Caddy example merely serves already signed static files.
 
-## CI and recovery
+## GitHub Actions, flashing, and recovery
 
-`.gitea/workflows/validate.yml` runs shell, JSON, unit, and simple secret checks.
-`.gitea/workflows/build-image.yml` is manual and requires a privileged Linux
-Docker runner with at least 8 GiB RAM and 50 GiB free. The workflow creates an
-ephemeral unprivileged builder user with access to the mounted Docker socket,
-because Armbian must not run `compile.sh` as root. It intentionally does not
-build an Armbian image for every push.
+`.github/workflows/validate.yml` runs on every push and pull request. It performs
+fast shell, JSON, JSON Schema, target-contract, unit-file, private-key/token,
+pin, documentation, and configuration-agent checks without building an image.
 
-To recover: download a known image, verify its SHA-256, flash it, connect Ethernet
-and the SDR, and boot. The receiver retrieves its configuration and resumes from
-the server. For diagnostics:
+`.github/workflows/build-image.yml` is manual. It runs on a GitHub-hosted Ubuntu
+24.04 runner and invokes the official Armbian GitHub Action directly, with
+runner cleanup enabled for the required disk space. It does not recreate the old
+Gitea runner-inside-container-inside-Docker arrangement. Before dispatching the
+workflow, add the repository secret `ADSB_ADMIN_AUTHORIZED_KEYS` containing only
+the public SSH keys authorized for the image. The value is consumed in the image
+customization and never committed or printed. GitHub Releases contain the
+flashable image and checksum; the Actions artifact also has the reproducibility
+metadata.
+
+To build, open **Actions**, choose **Build image**, click **Run workflow**, and
+provide a unique image version such as `2026.08.20.1`. The initial matrix has one
+enabled target. Adding another Armbian-supported target means adding its
+declarative entry in `config/targets.json` and one matching matrix entry, not
+redesigning the appliance.
+
+To flash, download a known GitHub Release image and its SHA-256 file, verify the
+checksum, decompress the image, then write it with Raspberry Pi Imager or Balena
+Etcher. Connect Ethernet and the SDR, then boot. The receiver retrieves its
+signed configuration and resumes from the server. If the configuration server is
+temporarily unavailable, the last-known-good local configuration stays active.
+For diagnostics:
 
 ```bash
 systemctl status adsb-config-agent.service readsb.service adsb-config-refresh.timer

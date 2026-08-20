@@ -21,7 +21,7 @@ EOF
 }
 
 [[ ${1:-} != "--help" && ${1:-} != "-h" ]] || { usage; exit 0; }
-[[ $(uname -s) == "Linux" ]] || die "Armbian image builds require a privileged Linux host. Run this in a Linux VM or Gitea runner, not macOS."
+[[ $(uname -s) == "Linux" ]] || die "Armbian image builds require a privileged Linux host. Run this in a Linux VM or GitHub Actions, not macOS."
 require git; require jq; require sha256sum; require xz
 require docker
 docker info >/dev/null 2>&1 || die "Docker must be running and accessible to the current user"
@@ -64,10 +64,10 @@ for target in "${build_targets[@]}"; do
   mkdir -p "$target_dir"
   rm -rf "$armbian_dir/output/images"
   cp -a "$repo_root/userpatches/." "$armbian_dir/userpatches/"
-  install -D -m 0600 "$ssh_keys_file" "$armbian_dir/userpatches/overlay/home/admin/.ssh/authorized_keys"
   ADSB_IMAGE_VERSION="$image_version" ADSB_GIT_COMMIT="$git_commit" ADSB_ARMBIAN_REVISION="$armbian_revision" \
     ADSB_TARGET="$target" ADSB_TARGET_ARCH="$arch" ADSB_READSB_REVISION="$(jq -er '.readsb.revision' "$build_config")" \
     ADSB_CONFIG_URL_TEMPLATE="$(jq -er '.defaults.configUrlTemplate' "$build_config")" \
+    ADSB_ADMIN_AUTHORIZED_KEYS="$(<"$ssh_keys_file")" \
     "$armbian_dir/compile.sh" \
       BOARD="$board" BRANCH="$branch" RELEASE="$release" KERNELBRANCH="commit:$kernel_revision" BUILD_MINIMAL=yes BUILD_DESKTOP=no \
       KERNEL_CONFIGURE=no CLEAN_LEVEL=make,oldcache

@@ -24,8 +24,9 @@ apt-get purge -y git build-essential debhelper pkg-config fakeroot help2man libn
 apt-get autoremove -y
 
 id -u admin >/dev/null 2>&1 || useradd --create-home --groups sudo --shell /bin/bash admin
-chown -R admin:admin /home/admin/.ssh
-chmod 0700 /home/admin/.ssh
+install -d -o admin -g admin -m 0700 /home/admin/.ssh
+printf '%s\n' "${ADSB_ADMIN_AUTHORIZED_KEYS:?missing ADSB_ADMIN_AUTHORIZED_KEYS}" > /home/admin/.ssh/authorized_keys
+chown admin:admin /home/admin/.ssh/authorized_keys
 chmod 0600 /home/admin/.ssh/authorized_keys
 install -m 0644 /dev/null /etc/adsb-receiver/config-url-template
 printf '%s\n' "${ADSB_CONFIG_URL_TEMPLATE:?missing config URL template}" > /etc/adsb-receiver/config-url-template

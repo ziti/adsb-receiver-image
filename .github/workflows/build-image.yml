@@ -1,0 +1,132 @@
+name: Build image
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_version:
+        description: Release and image version, for example 2026.08.20.1
+        required: true
+        default: 2026.08.20.1
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  # Armbian v26.5.1. This pins both the invoked action and the framework it
+  # checks out internally, rather than relying on a moving branch.
+  ARMBIAN_ACTION_REVISION: 8de11a017f7f05a82c77850f8322928cb6a3b70c
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep this explicit until more targets exist. Each enabled target can
+        # become one include entry without changing the build architecture.
+        include:
+          - target: orangepi-zero3
+            board: orangepizero3
+            architecture: arm64
+            release: trixie
+            kernel_branch: current
+    env:
+      ADSB_IMAGE_VERSION: ${{ inputs.image_version }}
+      ADSB_GIT_COMMIT: ${{ github.sha }}
+      ADSB_ARMBIAN_REVISION: 8de11a017f7f05a82c77850f8322928cb6a3b70c
+      ADSB_TARGET: ${{ matrix.target }}
+      ADSB_TARGET_ARCH: ${{ matrix.architecture }}
+      # This is deliberately a repository secret. Only public SSH keys are
+      # written into the image; the workflow never logs their value.
+      ADSB_ADMIN_AUTHORIZED_KEYS: ${{ secrets.ADSB_ADMIN_AUTHORIZED_KEYS }}
+
+    steps:
+      - name: Check out source for metadata
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Validate the selected target
+        run: |
+          python3 -m pip install --user 'jsonschema==4.25.1'
+          python3 scripts/validate_repository.py --target "${{ matrix.target }}"
+          test -n "$ADSB_ADMIN_AUTHORIZED_KEYS" || {
+            echo 'Missing required ADSB_ADMIN_AUTHORIZED_KEYS repository secret.' >&2
+            exit 1
+          }
+
+      - name: Load build configuration
+        run: |
+          python3 - <<'PY' >> "$GITHUB_ENV"
+          import json
+          from pathlib import Path
+
+          build = json.loads(Path("config/build.json").read_text())
+          print(f"ADSB_READSB_REVISION={build['readsb']['revision']}")
+          print(f"ADSB_CONFIG_URL_TEMPLATE={build['defaults']['configUrlTemplate']}")
+          PY
+
+      - name: Build and release with Armbian
+        uses: armbian/build@8de11a017f7f05a82c77850f8322928cb6a3b70c # v26.5.1
+        with:
+          armbian_token: ${{ github.token }}
+          armbian_branch: 8de11a017f7f05a82c77850f8322928cb6a3b70c
+          armbian_board: ${{ matrix.board }}
+          armbian_kernel_branch: ${{ matrix.kernel_branch }}
+          armbian_release: ${{ matrix.release }}
+          armbian_target: build
+          armbian_ui: minimal
+          armbian_compress: sha,img,xz
+          armbian_version: ${{ inputs.image_version }}
+          armbian_release_tag: ${{ inputs.image_version }}
+          armbian_release_title: ADS-B receiver image ${{ inputs.image_version }}
+          armbian_release_body: |
+            Reproducible minimal Armbian-based ADS-B receiver image.
+            Target: ${{ matrix.target }} (${{ matrix.board }}, ${{ matrix.architecture }}).
+            Framework/action revision: 8de11a017f7f05a82c77850f8322928cb6a3b70c (v26.5.1).
+          armbian_runner_clean: yes
+          armbian_download_repository: ''
+          armbian_index_url: ''
+
+      - name: Assemble reproducibility metadata
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          metadata_dir="build/output/adsb-metadata/${{ matrix.target }}"
+          mkdir -p "$metadata_dir"
+          cp config/build.json config/targets.json "$metadata_dir/"
+          cp build/output/info/git_sources.json "$metadata_dir/git_sources.json"
+          sha256sum build/output/images/*.img.xz > "$metadata_dir/image-sha256sums.txt"
+          python3 - "$metadata_dir/build-manifest.json" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          build = json.loads(Path("config/build.json").read_text())
+          targets = json.loads(Path("config/targets.json").read_text())
+          target_name = os.environ["ADSB_TARGET"]
+          manifest = {
+              "repositoryCommit": os.environ["ADSB_GIT_COMMIT"],
+              "imageVersion": os.environ["ADSB_IMAGE_VERSION"],
+              "target": {"id": target_name, **targets["targets"][target_name]},
+              "debianRelease": build["armbian"]["release"],
+              "readsb": build["readsb"],
+              "armbian": {
+                  "actionRevision": os.environ["ARMBIAN_ACTION_REVISION"],
+                  "frameworkRevision": os.environ["ADSB_ARMBIAN_REVISION"],
+                  "version": "v26.5.1",
+              },
+          }
+          Path(sys.argv[1]).write_text(json.dumps(manifest, indent=2) + "\n")
+          PY
+
+      - name: Upload image, checksum, and reproducibility metadata
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: adsb-receiver-${{ matrix.target }}-${{ inputs.image_version }}
+          if-no-files-found: error
+          path: |
+            build/output/images/*.img.xz
+            build/output/images/*.sha
+            build/output/adsb-metadata/${{ matrix.target }}/

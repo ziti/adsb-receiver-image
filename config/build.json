@@ -2,7 +2,7 @@
   "imageVersion": "2026.08.19.1",
   "armbian": {
     "repository": "https://github.com/armbian/build.git",
-    "revision": "9de7be05323564424cf64171cb483712ec356bc1",
+    "revision": "8de11a017f7f05a82c77850f8322928cb6a3b70c",
     "release": "trixie"
   },
   "readsb": {
@@ -13,7 +13,7 @@
     "adminUser": "admin",
     "timezone": "America/Chicago",
     "locale": "C.UTF-8",
-    "configUrlTemplate": "https://example.internal/adsb/config/{receiver_id}.json",
+    "configUrlTemplate": "https://config.example.invalid/adsb/config/{receiver_id}.json",
     "sshAuthorizedKeysFile": "config/authorized_keys"
   }
 }
