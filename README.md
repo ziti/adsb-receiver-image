@@ -17,7 +17,8 @@ image per board without cross-contaminating names or manifests.
 
 | Target | Build board | Absolute minimum | Practical recommendation |
 | --- | --- | --- | --- |
-| Orange Pi Zero 3 | `orangepizero3` | Estimated: 1 GiB RAM, 8 GiB SD card, Ethernet, one USB host port | Estimated: 2 GiB RAM, 16 GiB high-endurance SD card, RTL-SDR Blog V3 or equivalent |
+| Orange Pi Zero2 | `orangepizero2` | Estimated: 1 GiB RAM, 8 GiB SD card, Ethernet, one USB host port | Estimated: 2 GiB RAM, 16 GiB high-endurance SD card, RTL-SDR Blog V3 or equivalent |
+| Orange Pi Zero3 | `orangepizero3` | Estimated: 1 GiB RAM, 8 GiB SD card, Ethernet, one USB host port | Estimated: 2 GiB RAM, 16 GiB high-endurance SD card, RTL-SDR Blog V3 or equivalent |
 
 For a future device, add a target with its Armbian `BOARD` name, architecture,
 and `minimumHardware`. As a planning floor, do not add a receiver below 1 GiB
