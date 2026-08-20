@@ -27,11 +27,26 @@ kind of mystery failures that waste a Saturday.
 
 ## Architecture
 
-```text
-RTL-SDR -> readsb on receiver -> BeastReduce+ -> central readsb/MLAT/tar1090
-                     ^
-                     | signed JSON
-              adsb-config-agent <- HTTPS config server
+```mermaid
+flowchart LR
+    subgraph Receiver["Receiver"]
+        SDR["RTL-SDR"]
+        ReadsbRx["readsb"]
+        BeastReduce["BeastReduce+"]
+        Agent["adsb-config-agent"]
+
+        SDR --> ReadsbRx
+        ReadsbRx --> BeastReduce
+        Agent -->|"signed JSON"| ReadsbRx
+    end
+
+    subgraph Central["Central Server"]
+        ReadsbCentral["readsb / MLAT / tar1090"]
+        ConfigServer["HTTPS config server"]
+    end
+
+    BeastReduce --> ReadsbCentral
+    ConfigServer -->|"HTTPS"| Agent
 ```
 
 At boot, `adsb-config-agent.service` waits for network, downloads JSON plus its

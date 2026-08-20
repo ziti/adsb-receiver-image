@@ -13,7 +13,7 @@
     "adminUser": "admin",
     "timezone": "America/Chicago",
     "locale": "C.UTF-8",
-    "configUrlTemplate": "https://config.example.invalid/adsb/config/{receiver_id}.json",
+    "configUrlTemplate": "https://adsb-server.local/adsb/config/{receiver_id}.json",
     "sshAuthorizedKeysFile": "config/authorized_keys"
   }
 }

@@ -3,7 +3,7 @@
     "orangepi-zero3": {
       "enabled": true,
       "board": "orangepizero3",
-      "displayName": "Orange Pi Zero 3",
+      "displayName": "Orange Pi Zero3",
       "architecture": "arm64",
       "armbian": {
         "branch": "current",
@@ -16,6 +16,23 @@
         "usbHostPorts": 1,
         "notes": "2 GiB RAM and a 16 GiB high-endurance SD card are the practical recommendation."
       }
-    }
+    },
+    "orangepi-zero2": {
+      "enabled": true,
+      "board": "orangepizero2",
+      "displayName": "Orange Pi Zero2",
+      "architecture": "arm64",
+      "armbian": {
+        "branch": "current",
+        "kernelRevision": "bf3be28f6721e24961992ebb9e61c0cf21a56806"
+      },
+      "minimumHardware": {
+        "ramMiB": 1024,
+        "storageGiB": 8,
+        "ethernet": true,
+        "usbHostPorts": 1,
+        "notes": "2 GiB RAM and a 16 GiB high-endurance SD card are the practical recommendation."
+      }
+    }    
   }
 }
