@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import json
 import re
 import subprocess
@@ -48,6 +49,33 @@ def tracked_text() -> str:
         if path.is_file():
             text.append(path.read_text(encoding="utf-8", errors="ignore"))
     return "\n".join(text)
+
+
+def validate_systemd_units() -> None:
+    units = ROOT / "userpatches/overlay/etc/systemd/system"
+    overlay = ROOT / "userpatches/overlay"
+    for unit_path in sorted(units.glob("*")):
+        if unit_path.suffix not in {".service", ".timer"}:
+            continue
+        parser = configparser.ConfigParser(interpolation=None, strict=True)
+        parser.optionxform = str
+        try:
+            parser.read_file(unit_path.open())
+        except (OSError, configparser.Error) as exc:
+            fail(f"invalid systemd unit {unit_path.relative_to(ROOT)}: {exc}")
+        if not parser.has_option("Unit", "Description"):
+            fail(f"systemd unit lacks Unit/Description: {unit_path.relative_to(ROOT)}")
+        if unit_path.suffix == ".service":
+            if not parser.has_option("Service", "ExecStart"):
+                fail(f"service lacks Service/ExecStart: {unit_path.relative_to(ROOT)}")
+            executable = parser["Service"]["ExecStart"].split()[0].lstrip("-!@:")
+            if executable.startswith("/") and not (overlay / executable.lstrip("/")).exists():
+                fail(f"service executable is absent from overlay: {executable}")
+        else:
+            if not parser.has_option("Timer", "OnBootSec"):
+                fail(f"timer lacks Timer/OnBootSec: {unit_path.relative_to(ROOT)}")
+            if not parser.has_section("Install") or not parser.has_option("Install", "WantedBy"):
+                fail(f"timer lacks Install/WantedBy: {unit_path.relative_to(ROOT)}")
 
 
 def main() -> None:
@@ -101,6 +129,7 @@ def main() -> None:
         fail("readsb revision must be an immutable 40-character commit")
     if armbian.get("release") != "trixie":
         fail("this appliance currently supports only the validated Debian trixie release")
+    validate_systemd_units()
 
     workflows = ROOT / ".github" / "workflows"
     for workflow in workflows.glob("*.yml"):

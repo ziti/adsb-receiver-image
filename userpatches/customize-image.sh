@@ -39,4 +39,4 @@ READSB_REVISION=${ADSB_READSB_REVISION:?}
 TARGET=${ADSB_TARGET:?}
 EOF
 systemctl disable apt-daily.timer apt-daily-upgrade.timer || true
-systemctl enable adsb-config-agent.service adsb-config-refresh.timer readsb.service
+systemctl enable adsb-config-refresh.timer readsb.service

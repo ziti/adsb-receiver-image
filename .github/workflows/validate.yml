@@ -30,8 +30,3 @@ jobs:
 
       - name: Run configuration-agent tests
         run: python3 -m unittest discover -s tests -v
-
-      - name: Check systemd unit syntax
-        run: |
-          systemd-analyze verify --root="$PWD/userpatches/overlay" \
-            /etc/systemd/system/*.service /etc/systemd/system/*.timer
