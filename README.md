@@ -97,13 +97,17 @@ version for `/etc/adsb-receiver-release`, the GitHub Release tag/title, artifact
 name, and build manifest. It deliberately leaves `armbian_version` unset so the
 official Action resolves and increments its own supported three-part revision.
 
-`config/targets.json` is also the single source of truth for each target kernel
-commit. The workflow exports that target's `kernelRevision` as
-`ADSB_KERNEL_REVISION` and enables `userpatches/extensions/adsb-kernel-pin.sh`.
-Armbian runs its supported `late_family_config` hook before resolving sources;
-the extension sets `KERNELBRANCH=commit:<kernelRevision>`. The official Action
-still receives `armbian_kernel_branch: current` for the board's high-level kernel
-classification, but kernel checkout is pinned to the declarative target commit.
+`config/targets.json` is the source of truth for each target kernel commit. The
+official Action relaunches the Armbian framework in Docker with a deliberately
+curated environment, so arbitrary workflow variables are not available inside
+the build. `userpatches/extensions/adsb-kernel-pin.sh` therefore carries the
+small board-and-branch pin map used by Armbian's supported
+`late_family_config` hook. Repository validation executes that hook for every
+enabled target and rejects any resolved commit that differs from
+`config/targets.json`. The workflow still exports the declared revision only
+for its build manifest. `armbian_kernel_branch: current` remains the board's
+high-level kernel classification, while the hook sets
+`KERNELBRANCH=commit:<kernelRevision>` before source resolution.
 
 Before a production build, replace the example public key at
 `userpatches/overlay/etc/adsb-receiver/publickey.minisign`, set the URL template,

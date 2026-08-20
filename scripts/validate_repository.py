@@ -96,6 +96,55 @@ def production_placeholders(build: object) -> list[str]:
     return findings
 
 
+def validate_kernel_pin_extension(targets: dict[str, object]) -> None:
+    """Execute the Armbian hook and compare each enabled target to its declaration.
+
+    The official Action's Docker relaunch does not forward arbitrary workflow
+    variables, so the extension intentionally carries its own board/branch map.
+    Exercising the hook makes that necessary duplication fail closed if it drifts
+    from config/targets.json.
+    """
+    extension = ROOT / "userpatches/extensions/adsb-kernel-pin.sh"
+    if not extension.is_file():
+        fail("kernel-pin Armbian extension is missing")
+    command = r'''
+display_alert() { :; }
+source "$1"
+BOARD="$2"
+BRANCH="$3"
+late_family_config__900_adsb_kernel_pin
+printf '%s' "${KERNELBRANCH:-}"
+'''
+    for target_id, target in targets.items():
+        if not target["enabled"]:
+            continue
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                command,
+                "validate-kernel-pin",
+                str(extension),
+                target["board"],
+                target["armbian"]["branch"],
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode:
+            fail(
+                f"kernel-pin extension failed for {target_id!r}: "
+                f"{result.stderr.strip() or 'unknown error'}"
+            )
+        expected = f"commit:{target['armbian']['kernelRevision']}"
+        if result.stdout != expected:
+            fail(
+                f"kernel-pin extension for {target_id!r} resolved {result.stdout!r}, "
+                f"expected {expected!r} from config/targets.json"
+            )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--target")
@@ -174,11 +223,9 @@ def main() -> None:
         fail("appliance image_version must not be passed to armbian_version")
     if "armbian_extensions: adsb-kernel-pin" not in build_workflow:
         fail("build workflow must enable the ADS-B kernel-pin Armbian extension")
-    kernel_pin_extension = ROOT / "userpatches/extensions/adsb-kernel-pin.sh"
-    if not kernel_pin_extension.is_file() or 'KERNELBRANCH="commit:${ADSB_KERNEL_REVISION}"' not in kernel_pin_extension.read_text():
-        fail("kernel-pin extension must set KERNELBRANCH from ADSB_KERNEL_REVISION")
     if "ADSB_KERNEL_REVISION={target['armbian']['kernelRevision']}" not in build_workflow:
         fail("build workflow must derive ADSB_KERNEL_REVISION from config/targets.json")
+    validate_kernel_pin_extension(targets)
     if (ROOT / ".gitea" / "workflows" / "build-image.yml").exists():
         fail("obsolete Gitea image-build workflow is still enabled")
 
