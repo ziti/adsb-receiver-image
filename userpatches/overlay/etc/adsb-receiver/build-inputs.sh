@@ -8,7 +8,7 @@
 # validate_repository.py requires these values to match config/build.json.
 
 # shellcheck disable=SC2034 # customize-image.sh reads these after sourcing this file.
-ADSB_IMAGE_VERSION='2026.08.21.2'
+ADSB_IMAGE_VERSION='2026.08.21.3'
 ADSB_ARMBIAN_REVISION='0620eb67885d19aeabd62655e60870ffd1efad63'
 ADSB_READSB_REVISION='d9a4c62655490e70d07704e207738bb9c6cffde1'
 ADSB_CONFIG_URL_TEMPLATE='https://adsb-server.local/adsb/config/{receiver_id}.json'

@@ -258,6 +258,11 @@ def main() -> None:
         fail("customize-image.sh must not record the unavailable build-time RELEASE variable")
     if ". /tmp/overlay/etc/adsb-receiver/build-inputs.sh" not in customize_script:
         fail("customize-image.sh must source repository-validated inputs from Armbian's overlay mount")
+    overlay_copy = "cp -a /tmp/overlay/. /"
+    if overlay_copy not in customize_script:
+        fail("customize-image.sh must materialize Armbian's overlay into the target filesystem")
+    if customize_script.index(overlay_copy) > customize_script.index("systemctl enable"):
+        fail("customize-image.sh must materialize the overlay before enabling its systemd units")
     validate_customize_build_inputs(build, targets)
     validate_systemd_units()
 

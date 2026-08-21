@@ -20,6 +20,11 @@ fi
 . /tmp/overlay/etc/adsb-receiver/build-inputs.sh
 adsb_target_id "$3"
 
+# Armbian bind-mounts the overlay for customization but does not copy it into
+# the target filesystem. Materialize the runtime configuration and units before
+# enabling them later in this script.
+cp -a /tmp/overlay/. /
+
 apt-get update
 apt-get install --no-install-recommends -y \
   ca-certificates curl jq minisign openssh-server sudo \

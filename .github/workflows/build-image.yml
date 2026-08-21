@@ -6,7 +6,7 @@ on:
       image_version:
         description: Release and image version, for example 2026.08.20.1
         required: true
-        default: 2026.08.21.2
+        default: 2026.08.21.3
         type: string
 
 permissions:

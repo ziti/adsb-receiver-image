@@ -116,6 +116,9 @@ high-level kernel classification, while the hook sets
 The same inner Docker boundary applies to target customization. Before calling
 `customize-image.sh`, the pinned framework bind-mounts
 `userpatches/overlay/` at `/tmp/overlay` inside the target chroot.
+The customization script copies that tree into the target root filesystem
+before enabling its systemd units. This explicit copy is required because the
+framework mount is temporary.
 `userpatches/overlay/etc/adsb-receiver/build-inputs.sh` supplies the pinned
 readsb revision, appliance version, framework revision, and configuration URL
 from that mount. It contains no secrets, and repository validation rejects it
@@ -168,7 +171,7 @@ metadata.
 
 To build, open **Actions**, choose **Build image**, click **Run workflow**, and
 provide the version committed in `config/build.json`, currently
-`2026.08.21.2`. The workflow rejects a mismatch, preventing the GitHub Release
+`2026.08.21.3`. The workflow rejects a mismatch, preventing the GitHub Release
 from being tagged differently than the image's embedded release data. The initial
 matrix has one enabled target. Validation requires its explicit matrix entries to
 match the enabled target declarations. Adding another Armbian-supported target
