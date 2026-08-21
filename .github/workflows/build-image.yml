@@ -6,7 +6,7 @@ on:
       image_version:
         description: Release and image version, for example 2026.08.20.1
         required: true
-        default: 2026.08.20.1
+        default: 2026.08.21.2
         type: string
 
 permissions:
@@ -33,14 +33,9 @@ jobs:
             release: trixie
             kernel_branch: current
     env:
-      ADSB_IMAGE_VERSION: ${{ inputs.image_version }}
-      ADSB_GIT_COMMIT: ${{ github.sha }}
-      ADSB_ARMBIAN_REVISION: 0620eb67885d19aeabd62655e60870ffd1efad63
-      ADSB_TARGET: ${{ matrix.target }}
-      ADSB_TARGET_ARCH: ${{ matrix.architecture }}
-      # This is deliberately a repository secret. Only public SSH keys are
-      # written into the image; the workflow never logs their value.
-      ADSB_ADMIN_AUTHORIZED_KEYS: ${{ secrets.ADSB_ADMIN_AUTHORIZED_KEYS }}
+      IMAGE_VERSION: ${{ inputs.image_version }}
+      REPOSITORY_COMMIT: ${{ github.sha }}
+      TARGET_ID: ${{ matrix.target }}
 
     steps:
       - name: Check out source for metadata
@@ -55,8 +50,11 @@ jobs:
         run: |
           python -m pip install 'jsonschema==4.25.1'
           python scripts/validate_repository.py --production --target "${{ matrix.target }}"
-          test -n "$ADSB_ADMIN_AUTHORIZED_KEYS" || {
-            echo 'Missing required ADSB_ADMIN_AUTHORIZED_KEYS repository secret.' >&2
+          # The committed appliance version is part of the reproducible image
+          # input. The dispatch value only selects the matching release tag.
+          source userpatches/overlay/etc/adsb-receiver/build-inputs.sh
+          test "$ADSB_IMAGE_VERSION" = "$IMAGE_VERSION" || {
+            echo "image_version must match config/build.json: $ADSB_IMAGE_VERSION" >&2
             exit 1
           }
 
@@ -112,10 +110,10 @@ jobs:
 
           build = json.loads(Path("config/build.json").read_text())
           targets = json.loads(Path("config/targets.json").read_text())
-          target_name = os.environ["ADSB_TARGET"]
+          target_name = os.environ["TARGET_ID"]
           manifest = {
-              "repositoryCommit": os.environ["ADSB_GIT_COMMIT"],
-              "imageVersion": os.environ["ADSB_IMAGE_VERSION"],
+              "repositoryCommit": os.environ["REPOSITORY_COMMIT"],
+              "imageVersion": os.environ["IMAGE_VERSION"],
               "target": {"id": target_name, **targets["targets"][target_name]},
               "debianRelease": build["armbian"]["release"],
               "readsb": build["readsb"],

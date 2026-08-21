@@ -1,5 +1,5 @@
 {
-  "imageVersion": "2026.08.19.1",
+  "imageVersion": "2026.08.21.2",
   "armbian": {
     "repository": "https://github.com/armbian/build.git",
     "revision": "0620eb67885d19aeabd62655e60870ffd1efad63",
@@ -13,7 +13,6 @@
     "adminUser": "admin",
     "timezone": "America/Chicago",
     "locale": "C.UTF-8",
-    "configUrlTemplate": "https://adsb-server.local/adsb/config/{receiver_id}.json",
-    "sshAuthorizedKeysFile": "config/authorized_keys"
+    "configUrlTemplate": "https://adsb-server.local/adsb/config/{receiver_id}.json"
   }
 }

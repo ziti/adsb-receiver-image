@@ -17,6 +17,8 @@ from jsonschema import Draft202012Validator
 
 ROOT = Path(__file__).resolve().parents[1]
 SHA = re.compile(r"^[0-9a-f]{40}$")
+IMAGE_VERSION = re.compile(r"^\d{4}\.\d{2}\.\d{2}\.\d+$")
+SSH_PUBLIC_KEY = re.compile(r"^(?:ssh-(?:ed25519|rsa)|ecdsa-sha2-nistp(?:256|384|521))\s+\S+(?:\s+.*)?$")
 REQUIRED_TARGET_FIELDS = {"enabled", "board", "displayName", "architecture", "armbian", "minimumHardware"}
 REQUIRED_ARMBIAN_FIELDS = {"branch", "kernelRevision"}
 REQUIRED_HARDWARE_FIELDS = {"ramMiB", "storageGiB", "ethernet", "usbHostPorts", "notes"}
@@ -145,29 +147,53 @@ printf '%s' "${KERNELBRANCH:-}"
             )
 
 
-def validate_customize_build_inputs(build: dict[str, object]) -> None:
-    """Check non-secret inputs that cross Armbian's inner chroot boundary."""
+def validate_customize_build_inputs(build: dict[str, object], targets: dict[str, object]) -> None:
+    """Check image inputs that cross Armbian's inner Docker/chroot boundary."""
     inputs = ROOT / "userpatches/overlay/etc/adsb-receiver/build-inputs.sh"
+    authorized_keys = ROOT / "userpatches/overlay/etc/adsb-receiver/admin-authorized_keys"
     if not inputs.is_file():
         fail("customize build-inputs overlay file is missing")
+    if not authorized_keys.is_file():
+        fail("administrator public-key overlay file is missing")
+    key_lines = [line for line in authorized_keys.read_text().splitlines() if line and not line.startswith("#")]
+    if not key_lines or any(not SSH_PUBLIC_KEY.fullmatch(line) for line in key_lines):
+        fail("administrator public-key overlay file must contain one or more valid SSH public keys")
     command = r'''
 set -Eeuo pipefail
 source "$1"
-printf '%s\n%s\n' "$ADSB_READSB_REVISION" "$ADSB_CONFIG_URL_TEMPLATE"
+adsb_target_id "$2"
+printf '%s\n%s\n%s\n%s\n%s\n' \
+  "$ADSB_IMAGE_VERSION" "$ADSB_ARMBIAN_REVISION" "$ADSB_READSB_REVISION" \
+  "$ADSB_CONFIG_URL_TEMPLATE" "$ADSB_TARGET"
 '''
-    result = subprocess.run(
-        ["bash", "-c", command, "validate-build-inputs", str(inputs)],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode:
-        fail(f"customize build-inputs file is invalid: {result.stderr.strip() or 'unknown error'}")
-    readsb_revision, config_url = result.stdout.splitlines()
-    if readsb_revision != build["readsb"]["revision"]:
-        fail("customize build-inputs readsb revision differs from config/build.json")
-    if config_url != build["defaults"]["configUrlTemplate"]:
-        fail("customize build-inputs configuration URL differs from config/build.json")
+    for target_id, target in targets.items():
+        if not target["enabled"]:
+            continue
+        result = subprocess.run(
+            ["bash", "-c", command, "validate-build-inputs", str(inputs), target["board"]],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode:
+            fail(
+                f"customize build-inputs file is invalid for {target_id!r}: "
+                f"{result.stderr.strip() or 'unknown error'}"
+            )
+        image_version, armbian_revision, readsb_revision, config_url, resolved_target = result.stdout.splitlines()
+        if not IMAGE_VERSION.fullmatch(image_version) or image_version != build["imageVersion"]:
+            fail("customize build-inputs image version differs from config/build.json")
+        if armbian_revision != build["armbian"]["revision"]:
+            fail("customize build-inputs Armbian revision differs from config/build.json")
+        if readsb_revision != build["readsb"]["revision"]:
+            fail("customize build-inputs readsb revision differs from config/build.json")
+        if config_url != build["defaults"]["configUrlTemplate"]:
+            fail("customize build-inputs configuration URL differs from config/build.json")
+        if resolved_target != target_id:
+            fail(
+                f"customize build-inputs board map resolved {resolved_target!r}, "
+                f"expected {target_id!r}"
+            )
 
 
 def main() -> None:
@@ -221,6 +247,8 @@ def main() -> None:
         fail("Armbian framework revision must be an immutable 40-character commit")
     if not SHA.fullmatch(readsb.get("revision", "")):
         fail("readsb revision must be an immutable 40-character commit")
+    if not IMAGE_VERSION.fullmatch(build.get("imageVersion", "")):
+        fail("imageVersion must use YYYY.MM.DD.N format")
     if armbian.get("release") != "trixie":
         fail("this appliance currently supports only the validated Debian trixie release")
     customize_script = (ROOT / "userpatches/customize-image.sh").read_text()
@@ -230,7 +258,7 @@ def main() -> None:
         fail("customize-image.sh must not record the unavailable build-time RELEASE variable")
     if ". /tmp/overlay/etc/adsb-receiver/build-inputs.sh" not in customize_script:
         fail("customize-image.sh must source repository-validated inputs from Armbian's overlay mount")
-    validate_customize_build_inputs(build)
+    validate_customize_build_inputs(build, targets)
     validate_systemd_units()
 
     placeholders = production_placeholders(build)
@@ -253,7 +281,6 @@ def main() -> None:
         fail("build workflow must pin the official Armbian action revision")
     for required_reference in (
         f"ARMBIAN_ACTION_REVISION: {armbian['revision']}",
-        f"ADSB_ARMBIAN_REVISION: {armbian['revision']}",
         f"armbian_branch: {armbian['revision']}",
     ):
         if required_reference not in build_workflow:
@@ -262,8 +289,12 @@ def main() -> None:
         fail("appliance image_version must not be passed to armbian_version")
     if "armbian_extensions: adsb-kernel-pin" not in build_workflow:
         fail("build workflow must enable the ADS-B kernel-pin Armbian extension")
-    if "ADSB_KERNEL_REVISION=" in build_workflow or "ADSB_READSB_REVISION=" in build_workflow:
-        fail("build workflow must not rely on arbitrary inputs across Armbian's inner Docker boundary")
+    if re.search(r"^\s+ADSB_[A-Z_]+:\s+\$\{\{", build_workflow, re.MULTILINE):
+        fail("build workflow must not pass arbitrary ADSB variables into Armbian's inner Docker boundary")
+    if f"default: {build['imageVersion']}" not in build_workflow:
+        fail("manual image_version default must match config/build.json")
+    if 'test "$ADSB_IMAGE_VERSION" = "$IMAGE_VERSION"' not in build_workflow:
+        fail("manual image_version must be checked against the committed image input")
     if '"kernelRevision": targets["targets"][target_name]["armbian"]["kernelRevision"]' not in build_workflow:
         fail("build manifest must read the declared kernel revision from config/targets.json")
     matrix_targets = set(re.findall(r"^\s*- target: ([a-z0-9-]+)\s*$", build_workflow, re.MULTILINE))
@@ -292,6 +323,10 @@ def main() -> None:
     readsb_unit = (ROOT / "userpatches/overlay/etc/systemd/system/readsb.service").read_text()
     if "Wants=adsb-config-agent.service" not in readsb_unit or "Requires=adsb-config-agent.service" in readsb_unit:
         fail("readsb must want, not require, a configuration fetch so cached configuration survives outages")
+    if 'install -m 0600 /tmp/overlay/etc/adsb-receiver/admin-authorized_keys' not in customize_script:
+        fail("customize-image.sh must install administrator keys from Armbian's overlay mount")
+    if "ADSB_ADMIN_AUTHORIZED_KEYS" in customize_script:
+        fail("customize-image.sh must not require a workflow-only administrator-key variable")
     print(f"validated {len(targets)} target(s), {len(enabled_targets)} enabled")
 
 

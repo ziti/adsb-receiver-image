@@ -30,9 +30,6 @@ docker info >/dev/null 2>&1 || die "Docker must be running and accessible to the
 armbian_repo=$(jq -er '.armbian.repository' "$build_config")
 armbian_revision=$(jq -er '.armbian.revision' "$build_config")
 image_version=$(jq -er '.imageVersion' "$build_config")
-ssh_keys_file=$(jq -er '.defaults.sshAuthorizedKeysFile' "$build_config")
-[[ "$ssh_keys_file" != /* ]] && ssh_keys_file="$repo_root/$ssh_keys_file"
-[[ -s "$ssh_keys_file" ]] || die "administrator SSH keys are required at $ssh_keys_file (start with config/authorized_keys.example)"
 git_commit=$(git -C "$repo_root" rev-parse --verify HEAD 2>/dev/null || printf 'uncommitted')
 
 if [[ ! -d "$armbian_dir/.git" ]]; then
@@ -64,11 +61,7 @@ for target in "${build_targets[@]}"; do
   mkdir -p "$target_dir"
   rm -rf "$armbian_dir/output/images"
   cp -a "$repo_root/userpatches/." "$armbian_dir/userpatches/"
-  ADSB_IMAGE_VERSION="$image_version" ADSB_GIT_COMMIT="$git_commit" ADSB_ARMBIAN_REVISION="$armbian_revision" \
-    ADSB_TARGET="$target" ADSB_TARGET_ARCH="$arch" ADSB_READSB_REVISION="$(jq -er '.readsb.revision' "$build_config")" \
-    ADSB_CONFIG_URL_TEMPLATE="$(jq -er '.defaults.configUrlTemplate' "$build_config")" \
-    ADSB_ADMIN_AUTHORIZED_KEYS="$(<"$ssh_keys_file")" \
-    "$armbian_dir/compile.sh" \
+  "$armbian_dir/compile.sh" \
       BOARD="$board" BRANCH="$branch" RELEASE="$release" KERNELBRANCH="commit:$kernel_revision" BUILD_MINIMAL=yes BUILD_DESKTOP=no \
       KERNEL_CONFIGURE=no CLEAN_LEVEL=make,oldcache
   images=()

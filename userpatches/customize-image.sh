@@ -18,6 +18,7 @@ fi
 # from that stable path instead of relying on workflow environment forwarding.
 # shellcheck source=/dev/null # Armbian creates this bind mount for customization.
 . /tmp/overlay/etc/adsb-receiver/build-inputs.sh
+adsb_target_id "$3"
 
 apt-get update
 apt-get install --no-install-recommends -y \
@@ -38,14 +39,12 @@ apt-get autoremove -y
 
 id -u admin >/dev/null 2>&1 || useradd --create-home --groups sudo --shell /bin/bash admin
 install -d -o admin -g admin -m 0700 /home/admin/.ssh
-printf '%s\n' "${ADSB_ADMIN_AUTHORIZED_KEYS:?missing ADSB_ADMIN_AUTHORIZED_KEYS}" > /home/admin/.ssh/authorized_keys
+install -m 0600 /tmp/overlay/etc/adsb-receiver/admin-authorized_keys /home/admin/.ssh/authorized_keys
 chown admin:admin /home/admin/.ssh/authorized_keys
-chmod 0600 /home/admin/.ssh/authorized_keys
 install -m 0644 /dev/null /etc/adsb-receiver/config-url-template
 printf '%s\n' "${ADSB_CONFIG_URL_TEMPLATE:?missing config URL template}" > /etc/adsb-receiver/config-url-template
 cat > /etc/adsb-receiver-release <<EOF
 IMAGE_VERSION=${ADSB_IMAGE_VERSION:?}
-GIT_COMMIT=${ADSB_GIT_COMMIT:?}
 ARMBIAN_REVISION=${ADSB_ARMBIAN_REVISION:?}
 DEBIAN_RELEASE=${debian_release}
 READSB_REVISION=${ADSB_READSB_REVISION:?}

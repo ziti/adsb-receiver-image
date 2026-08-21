@@ -117,18 +117,19 @@ The same inner Docker boundary applies to target customization. Before calling
 `customize-image.sh`, the pinned framework bind-mounts
 `userpatches/overlay/` at `/tmp/overlay` inside the target chroot.
 `userpatches/overlay/etc/adsb-receiver/build-inputs.sh` supplies the pinned
-readsb revision and configuration URL from that mount. It contains no secrets,
-and repository validation rejects it if either value drifts from
-`config/build.json`. The workflow reads the target kernel revision directly
-from `config/targets.json` when writing its manifest.
+readsb revision, appliance version, framework revision, and configuration URL
+from that mount. It contains no secrets, and repository validation rejects it
+if any pinned value drifts from `config/build.json`. The overlay also contains
+the administrator SSH public keys. Public keys are intentionally tracked: they
+are image configuration, not credentials. The workflow reads the target kernel
+revision directly from `config/targets.json` when writing its manifest.
 
 Before a production build, replace the example public key at
-`userpatches/overlay/etc/adsb-receiver/publickey.minisign`, set the URL template,
-and copy `config/authorized_keys.example` to the ignored
-`config/authorized_keys`, replacing its contents with administrator public keys.
-The build refuses to continue without that nonempty file. The image creates the
-`admin` user with passwordless sudo, disables password and root SSH login, and
-installs only those supplied keys.
+`userpatches/overlay/etc/adsb-receiver/publickey.minisign` and set the URL
+template. Update
+`userpatches/overlay/etc/adsb-receiver/admin-authorized_keys` when administrator
+access changes. The image creates the `admin` user with passwordless sudo,
+disables password and root SSH login, and installs only those public keys.
 
 ## Configuration and signing
 
@@ -159,18 +160,19 @@ pin, documentation, and configuration-agent checks without building an image.
 `.github/workflows/build-image.yml` is manual. It runs on a GitHub-hosted Ubuntu
 24.04 runner and invokes the official Armbian GitHub Action directly, with
 runner cleanup enabled for the required disk space. It does not recreate the old
-Gitea runner-inside-container-inside-Docker arrangement. Before dispatching the
-workflow, add the repository secret `ADSB_ADMIN_AUTHORIZED_KEYS` containing only
-the public SSH keys authorized for the image. The value is consumed in the image
-customization and never committed or printed. GitHub Releases contain the
+Gitea runner-inside-container-inside-Docker arrangement. The administrator SSH
+public keys are committed in `userpatches/overlay/`, so the official Action can
+reliably access them inside Armbian's inner chroot. GitHub Releases contain the
 flashable image and checksum; the Actions artifact also has the reproducibility
 metadata.
 
 To build, open **Actions**, choose **Build image**, click **Run workflow**, and
-provide a unique image version such as `2026.08.20.1`. The initial matrix has one
-enabled target. Validation requires its explicit matrix entries to match the
-enabled target declarations. Adding another Armbian-supported target means
-enabling its declarative entry and adding one matching matrix entry, not
+provide the version committed in `config/build.json`, currently
+`2026.08.21.2`. The workflow rejects a mismatch, preventing the GitHub Release
+from being tagged differently than the image's embedded release data. The initial
+matrix has one enabled target. Validation requires its explicit matrix entries to
+match the enabled target declarations. Adding another Armbian-supported target
+means enabling its declarative entry and adding one matching matrix entry, not
 redesigning the appliance.
 
 To flash, download a known GitHub Release image and its SHA-256 file, verify the
