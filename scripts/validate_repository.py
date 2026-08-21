@@ -197,6 +197,11 @@ def main() -> None:
         fail("readsb revision must be an immutable 40-character commit")
     if armbian.get("release") != "trixie":
         fail("this appliance currently supports only the validated Debian trixie release")
+    customize_script = (ROOT / "userpatches/customize-image.sh").read_text()
+    if ". /etc/os-release" not in customize_script or "VERSION_CODENAME" not in customize_script:
+        fail("customize-image.sh must validate the target userspace via /etc/os-release")
+    if "DEBIAN_RELEASE=${RELEASE}" in customize_script:
+        fail("customize-image.sh must not record the unavailable build-time RELEASE variable")
     validate_systemd_units()
 
     placeholders = production_placeholders(build)

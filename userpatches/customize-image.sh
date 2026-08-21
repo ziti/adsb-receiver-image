@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-if [[ ${RELEASE:-} != "trixie" ]]; then
-  echo "This image is pinned to Debian trixie; got ${RELEASE:-unset}" >&2
+# Armbian runs this script inside the target root filesystem. RELEASE is a
+# framework configuration variable and is not guaranteed to be forwarded into
+# that chroot, so assert the resulting userspace rather than its transient
+# build-time input.
+# shellcheck disable=SC1091 # Exists in the target Debian root filesystem.
+. /etc/os-release
+debian_release=${VERSION_CODENAME:-}
+if [[ $debian_release != "trixie" ]]; then
+  echo "This image is pinned to Debian trixie; got ${debian_release:-unset}" >&2
   exit 1
 fi
 
@@ -34,7 +41,7 @@ cat > /etc/adsb-receiver-release <<EOF
 IMAGE_VERSION=${ADSB_IMAGE_VERSION:?}
 GIT_COMMIT=${ADSB_GIT_COMMIT:?}
 ARMBIAN_REVISION=${ADSB_ARMBIAN_REVISION:?}
-DEBIAN_RELEASE=${RELEASE}
+DEBIAN_RELEASE=${debian_release}
 READSB_REVISION=${ADSB_READSB_REVISION:?}
 TARGET=${ADSB_TARGET:?}
 EOF
