@@ -167,7 +167,7 @@ def main() -> None:
         fail(f"selected target {args.target!r} is not declared")
 
     board_ids: set[str] = set()
-    enabled = 0
+    enabled_targets = []
     for target_id, target in targets.items():
         if not isinstance(target, dict):
             fail(f"target {target_id!r} must be an object")
@@ -185,8 +185,9 @@ def main() -> None:
             fail(f"target {target_id!r} kernelRevision must be an immutable 40-character commit")
         if REQUIRED_HARDWARE_FIELDS - target["minimumHardware"].keys():
             fail(f"target {target_id!r} has incomplete minimumHardware")
-        enabled += bool(target["enabled"])
-    if not enabled:
+        if target["enabled"]:
+            enabled_targets.append(target_id)
+    if not enabled_targets:
         fail("at least one target must be enabled")
 
     armbian = build.get("armbian", {}) if isinstance(build, dict) else {}
@@ -235,6 +236,15 @@ def main() -> None:
         fail("build workflow must enable the ADS-B kernel-pin Armbian extension")
     if "ADSB_KERNEL_REVISION={target['armbian']['kernelRevision']}" not in build_workflow:
         fail("build workflow must derive ADSB_KERNEL_REVISION from config/targets.json")
+    matrix_targets = set(re.findall(r"^\s*- target: ([a-z0-9-]+)\s*$", build_workflow, re.MULTILINE))
+    if matrix_targets != set(enabled_targets):
+        fail(
+            "enabled targets and build workflow matrix differ: "
+            f"targets={sorted(enabled_targets)}, matrix={sorted(matrix_targets)}"
+        )
+    for source_checkout in ("git -C build rev-parse HEAD", "git -C os rev-parse HEAD"):
+        if source_checkout not in build_workflow:
+            fail("build manifest must record both Armbian framework and os checkout revisions")
     validate_kernel_pin_extension(targets)
     if (ROOT / ".gitea" / "workflows" / "build-image.yml").exists():
         fail("obsolete Gitea image-build workflow is still enabled")
@@ -249,7 +259,10 @@ def main() -> None:
         fail("tracked private key detected")
     if TOKEN.search(text):
         fail("tracked access token detected")
-    print(f"validated {len(targets)} target(s), {enabled} enabled")
+    readsb_unit = (ROOT / "userpatches/overlay/etc/systemd/system/readsb.service").read_text()
+    if "Wants=adsb-config-agent.service" not in readsb_unit or "Requires=adsb-config-agent.service" in readsb_unit:
+        fail("readsb must want, not require, a configuration fetch so cached configuration survives outages")
+    print(f"validated {len(targets)} target(s), {len(enabled_targets)} enabled")
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@
       }
     },
     "orangepi-zero2": {
-      "enabled": true,
+      "enabled": false,
       "board": "orangepizero2",
       "displayName": "Orange Pi Zero2",
       "architecture": "arm64",

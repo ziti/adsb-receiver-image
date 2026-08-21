@@ -1,6 +1,8 @@
 [Unit]
 Description=ADS-B decoder and forwarder
-Requires=adsb-config-agent.service
+# A cached, validated readsb.args file is sufficient to resume after a reboot.
+# Do not make an unavailable configuration server stop the receiver.
+Wants=adsb-config-agent.service
 After=adsb-config-agent.service
 ConditionPathExists=/var/lib/adsb-receiver/readsb.args
 StartLimitIntervalSec=5min

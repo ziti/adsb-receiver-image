@@ -15,10 +15,10 @@ built by `./build.sh`; passing target names limits the build. Artifacts are
 written separately under `dist/<target>/`, so a mixed configuration produces an
 image per board without cross-contaminating names or manifests.
 
-| Target | Build board | Absolute minimum | Practical recommendation |
-| --- | --- | --- | --- |
-| Orange Pi Zero2 | `orangepizero2` | Estimated: 1 GiB RAM, 8 GiB SD card, Ethernet, one USB host port | Estimated: 2 GiB RAM, 16 GiB high-endurance SD card, RTL-SDR Blog V3 or equivalent |
-| Orange Pi Zero3 | `orangepizero3` | Estimated: 1 GiB RAM, 8 GiB SD card, Ethernet, one USB host port | Estimated: 2 GiB RAM, 16 GiB high-endurance SD card, RTL-SDR Blog V3 or equivalent |
+| Target | Build board | Status | Absolute minimum | Practical recommendation |
+| --- | --- | --- | --- | --- |
+| Orange Pi Zero3 | `orangepizero3` | Enabled, first boot qualification pending | Estimated: 1 GiB RAM, 8 GiB SD card, Ethernet, one USB host port | Estimated: 2 GiB RAM, 16 GiB high-endurance SD card, RTL-SDR Blog V3 or equivalent |
+| Orange Pi Zero2 | `orangepizero2` | Declarative target, disabled pending validation | Estimated: 1 GiB RAM, 8 GiB SD card, Ethernet, one USB host port | Estimated: 2 GiB RAM, 16 GiB high-endurance SD card, RTL-SDR Blog V3 or equivalent |
 
 For a future device, add a target with its Armbian `BOARD` name, architecture,
 and `minimumHardware`. As a planning floor, do not add a receiver below 1 GiB
@@ -85,7 +85,10 @@ Actions, which pins the official `armbian/build` action and framework to
 This revision removes three sunxi 6.18 patches that are already present in the
 target's pinned kernel commit, so the framework and kernel patch set agree.
 The action copies this repository's `userpatches/` into Armbian using its
-standard mechanism.
+standard mechanism. The official Action also checks out its `armbian/os`
+companion repository at its upstream default branch. That source is not an
+Action input we can pin, so each build manifest records its exact checkout
+commit alongside the pinned framework/action revision.
 Each successful build publishes a compressed `.img.xz` and checksum in a GitHub
 Release, plus a workflow artifact containing the target snapshot, build manifest,
 and all available Armbian `output/info/` source metadata. A normal image build
@@ -157,15 +160,17 @@ metadata.
 
 To build, open **Actions**, choose **Build image**, click **Run workflow**, and
 provide a unique image version such as `2026.08.20.1`. The initial matrix has one
-enabled target. Adding another Armbian-supported target means adding its
-declarative entry in `config/targets.json` and one matching matrix entry, not
+enabled target. Validation requires its explicit matrix entries to match the
+enabled target declarations. Adding another Armbian-supported target means
+enabling its declarative entry and adding one matching matrix entry, not
 redesigning the appliance.
 
 To flash, download a known GitHub Release image and its SHA-256 file, verify the
 checksum, decompress the image, then write it with Raspberry Pi Imager or Balena
 Etcher. Connect Ethernet and the SDR, then boot. The receiver retrieves its
 signed configuration and resumes from the server. If the configuration server is
-temporarily unavailable, the last-known-good local configuration stays active.
+temporarily unavailable, the last-known-good local configuration stays active,
+including after a reboot when cached `readsb` arguments exist.
 For diagnostics:
 
 ```bash

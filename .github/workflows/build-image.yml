@@ -111,7 +111,12 @@ jobs:
           else
             git_sources_metadata=not-generated-by-image-build
           fi
+          armbian_framework_checkout=$(git -C build rev-parse HEAD)
+          armbian_os_checkout=$(git -C os rev-parse HEAD)
+          test "$armbian_framework_checkout" = "$ARMBIAN_ACTION_REVISION"
           sha256sum build/output/images/*.img.xz > "$metadata_dir/image-sha256sums.txt"
+          ARMBIAN_FRAMEWORK_CHECKOUT="$armbian_framework_checkout" \
+          ARMBIAN_OS_CHECKOUT="$armbian_os_checkout" \
           GIT_SOURCES_METADATA="$git_sources_metadata" python - "$metadata_dir/build-manifest.json" <<'PY'
           import json
           import os
@@ -129,7 +134,8 @@ jobs:
               "readsb": build["readsb"],
               "armbian": {
                   "actionRevision": os.environ["ARMBIAN_ACTION_REVISION"],
-                  "frameworkRevision": os.environ["ADSB_ARMBIAN_REVISION"],
+                  "frameworkRevision": os.environ["ARMBIAN_FRAMEWORK_CHECKOUT"],
+                  "osRevision": os.environ["ARMBIAN_OS_CHECKOUT"],
                   "versionFile": "26.08.0-trunk",
                   "kernelBranchClass": "current",
                   "kernelRevision": os.environ["ADSB_KERNEL_REVISION"],
