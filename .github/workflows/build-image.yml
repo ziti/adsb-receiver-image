@@ -60,19 +60,6 @@ jobs:
             exit 1
           }
 
-      - name: Load build configuration
-        run: |
-          python - <<'PY' >> "$GITHUB_ENV"
-          import json
-          from pathlib import Path
-
-          build = json.loads(Path("config/build.json").read_text())
-          target = json.loads(Path("config/targets.json").read_text())["targets"]["${{ matrix.target }}"]
-          print(f"ADSB_READSB_REVISION={build['readsb']['revision']}")
-          print(f"ADSB_CONFIG_URL_TEMPLATE={build['defaults']['configUrlTemplate']}")
-          print(f"ADSB_KERNEL_REVISION={target['armbian']['kernelRevision']}")
-          PY
-
       - name: Build and release with Armbian
         uses: armbian/build@0620eb67885d19aeabd62655e60870ffd1efad63 # exact framework/action revision
         with:
@@ -138,7 +125,7 @@ jobs:
                   "osRevision": os.environ["ARMBIAN_OS_CHECKOUT"],
                   "versionFile": "26.08.0-trunk",
                   "kernelBranchClass": "current",
-                  "kernelRevision": os.environ["ADSB_KERNEL_REVISION"],
+                  "kernelRevision": targets["targets"][target_name]["armbian"]["kernelRevision"],
                   "gitSourcesMetadata": os.environ["GIT_SOURCES_METADATA"],
               },
           }

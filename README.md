@@ -109,10 +109,18 @@ the build. `userpatches/extensions/adsb-kernel-pin.sh` therefore carries the
 small board-and-branch pin map used by Armbian's supported
 `late_family_config` hook. Repository validation executes that hook for every
 enabled target and rejects any resolved commit that differs from
-`config/targets.json`. The workflow still exports the declared revision only
-for its build manifest. `armbian_kernel_branch: current` remains the board's
+`config/targets.json`. `armbian_kernel_branch: current` remains the board's
 high-level kernel classification, while the hook sets
 `KERNELBRANCH=commit:<kernelRevision>` before source resolution.
+
+The same inner Docker boundary applies to target customization. Before calling
+`customize-image.sh`, the pinned framework bind-mounts
+`userpatches/overlay/` at `/tmp/overlay` inside the target chroot.
+`userpatches/overlay/etc/adsb-receiver/build-inputs.sh` supplies the pinned
+readsb revision and configuration URL from that mount. It contains no secrets,
+and repository validation rejects it if either value drifts from
+`config/build.json`. The workflow reads the target kernel revision directly
+from `config/targets.json` when writing its manifest.
 
 Before a production build, replace the example public key at
 `userpatches/overlay/etc/adsb-receiver/publickey.minisign`, set the URL template,

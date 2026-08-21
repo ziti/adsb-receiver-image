@@ -13,6 +13,12 @@ if [[ $debian_release != "trixie" ]]; then
   exit 1
 fi
 
+# The pinned Armbian framework bind-mounts userpatches/overlay at /tmp/overlay
+# before entering this chroot. Read non-secret, repository-validated inputs
+# from that stable path instead of relying on workflow environment forwarding.
+# shellcheck source=/dev/null # Armbian creates this bind mount for customization.
+. /tmp/overlay/etc/adsb-receiver/build-inputs.sh
+
 apt-get update
 apt-get install --no-install-recommends -y \
   ca-certificates curl jq minisign openssh-server sudo \

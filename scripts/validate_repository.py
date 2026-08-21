@@ -145,6 +145,31 @@ printf '%s' "${KERNELBRANCH:-}"
             )
 
 
+def validate_customize_build_inputs(build: dict[str, object]) -> None:
+    """Check non-secret inputs that cross Armbian's inner chroot boundary."""
+    inputs = ROOT / "userpatches/overlay/etc/adsb-receiver/build-inputs.sh"
+    if not inputs.is_file():
+        fail("customize build-inputs overlay file is missing")
+    command = r'''
+set -Eeuo pipefail
+source "$1"
+printf '%s\n%s\n' "$ADSB_READSB_REVISION" "$ADSB_CONFIG_URL_TEMPLATE"
+'''
+    result = subprocess.run(
+        ["bash", "-c", command, "validate-build-inputs", str(inputs)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        fail(f"customize build-inputs file is invalid: {result.stderr.strip() or 'unknown error'}")
+    readsb_revision, config_url = result.stdout.splitlines()
+    if readsb_revision != build["readsb"]["revision"]:
+        fail("customize build-inputs readsb revision differs from config/build.json")
+    if config_url != build["defaults"]["configUrlTemplate"]:
+        fail("customize build-inputs configuration URL differs from config/build.json")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--target")
@@ -203,6 +228,9 @@ def main() -> None:
         fail("customize-image.sh must validate the target userspace via /etc/os-release")
     if "DEBIAN_RELEASE=${RELEASE}" in customize_script:
         fail("customize-image.sh must not record the unavailable build-time RELEASE variable")
+    if ". /tmp/overlay/etc/adsb-receiver/build-inputs.sh" not in customize_script:
+        fail("customize-image.sh must source repository-validated inputs from Armbian's overlay mount")
+    validate_customize_build_inputs(build)
     validate_systemd_units()
 
     placeholders = production_placeholders(build)
@@ -234,8 +262,10 @@ def main() -> None:
         fail("appliance image_version must not be passed to armbian_version")
     if "armbian_extensions: adsb-kernel-pin" not in build_workflow:
         fail("build workflow must enable the ADS-B kernel-pin Armbian extension")
-    if "ADSB_KERNEL_REVISION={target['armbian']['kernelRevision']}" not in build_workflow:
-        fail("build workflow must derive ADSB_KERNEL_REVISION from config/targets.json")
+    if "ADSB_KERNEL_REVISION=" in build_workflow or "ADSB_READSB_REVISION=" in build_workflow:
+        fail("build workflow must not rely on arbitrary inputs across Armbian's inner Docker boundary")
+    if '"kernelRevision": targets["targets"][target_name]["armbian"]["kernelRevision"]' not in build_workflow:
+        fail("build manifest must read the declared kernel revision from config/targets.json")
     matrix_targets = set(re.findall(r"^\s*- target: ([a-z0-9-]+)\s*$", build_workflow, re.MULTILINE))
     if matrix_targets != set(enabled_targets):
         fail(
