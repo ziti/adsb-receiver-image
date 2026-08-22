@@ -15,6 +15,7 @@ ADSB_CONFIG_URL_TEMPLATE='https://adsb-server.local/adsb/config/{receiver_id}.js
 
 adsb_target_id() {
   case "$1" in
+    orangepizero2) ADSB_TARGET='orangepi-zero2' ;;
     orangepizero3) ADSB_TARGET='orangepi-zero3' ;;
     *)
       printf 'unsupported Armbian board for ADS-B appliance: %s\n' "$1" >&2

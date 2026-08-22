@@ -24,9 +24,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Keep this explicit until more targets exist. Each enabled target can
-        # become one include entry without changing the build architecture.
+        # Keep this explicit: each enabled target has one isolated build.
         include:
+          - target: orangepi-zero2
+            board: orangepizero2
+            architecture: arm64
+            release: trixie
+            kernel_branch: current
           - target: orangepi-zero3
             board: orangepizero3
             architecture: arm64
