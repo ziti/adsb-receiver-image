@@ -10,9 +10,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from urllib.parse import urlparse
-
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, FormatChecker
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,8 +26,6 @@ TOKEN = re.compile(
     r"(?:" + "github" + r"_pat_|" + "gh" + r"p_|" + "gl" + r"pat-|gitea[_-]?token\s*[:=])",
     re.IGNORECASE,
 )
-PLACEHOLDER_PUBLIC_KEY_COMMENT = "Replace this example key before a production build"
-PLACEHOLDER_PUBLIC_KEY = "RWQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
 
 def fail(message: str) -> None:
@@ -48,7 +44,7 @@ def tracked_text() -> str:
     paths = subprocess.check_output(["git", "ls-files", "-z"], cwd=ROOT).decode().split("\0")
     text = []
     for relative in paths:
-        if not relative or relative == "userpatches/overlay/etc/adsb-receiver/publickey.minisign":
+        if not relative:
             continue
         path = ROOT / relative
         if path.is_file():
@@ -81,21 +77,6 @@ def validate_systemd_units() -> None:
                 fail(f"timer lacks Timer/OnBootSec: {unit_path.relative_to(ROOT)}")
             if not parser.has_section("Install") or not parser.has_option("Install", "WantedBy"):
                 fail(f"timer lacks Install/WantedBy: {unit_path.relative_to(ROOT)}")
-
-
-def production_placeholders(build: object) -> list[str]:
-    defaults = build.get("defaults", {}) if isinstance(build, dict) else {}
-    config_url = defaults.get("configUrlTemplate", "")
-    hostname = (urlparse(config_url).hostname or "").lower()
-    placeholder_hosts = {"config.example.invalid", "example.invalid", "example.com", "example.org", "example.net"}
-    findings = []
-    if hostname in placeholder_hosts or hostname.endswith(".example.invalid"):
-        findings.append(f"configuration URL is a placeholder: {config_url}")
-
-    public_key = (ROOT / "userpatches/overlay/etc/adsb-receiver/publickey.minisign").read_text()
-    if PLACEHOLDER_PUBLIC_KEY_COMMENT in public_key or PLACEHOLDER_PUBLIC_KEY in public_key:
-        findings.append("Minisign public key is the committed example placeholder")
-    return findings
 
 
 def validate_kernel_pin_extension(targets: dict[str, object]) -> None:
@@ -162,9 +143,9 @@ def validate_customize_build_inputs(build: dict[str, object], targets: dict[str,
 set -Eeuo pipefail
 source "$1"
 adsb_target_id "$2"
-printf '%s\n%s\n%s\n%s\n%s\n' \
+printf '%s\n%s\n%s\n%s\n' \
   "$ADSB_IMAGE_VERSION" "$ADSB_ARMBIAN_REVISION" "$ADSB_READSB_REVISION" \
-  "$ADSB_CONFIG_URL_TEMPLATE" "$ADSB_TARGET"
+  "$ADSB_TARGET"
 '''
     for target_id, target in targets.items():
         if not target["enabled"]:
@@ -180,15 +161,13 @@ printf '%s\n%s\n%s\n%s\n%s\n' \
                 f"customize build-inputs file is invalid for {target_id!r}: "
                 f"{result.stderr.strip() or 'unknown error'}"
             )
-        image_version, armbian_revision, readsb_revision, config_url, resolved_target = result.stdout.splitlines()
+        image_version, armbian_revision, readsb_revision, resolved_target = result.stdout.splitlines()
         if not IMAGE_VERSION.fullmatch(image_version) or image_version != build["imageVersion"]:
             fail("customize build-inputs image version differs from config/build.json")
         if armbian_revision != build["armbian"]["revision"]:
             fail("customize build-inputs Armbian revision differs from config/build.json")
         if readsb_revision != build["readsb"]["revision"]:
             fail("customize build-inputs readsb revision differs from config/build.json")
-        if config_url != build["defaults"]["configUrlTemplate"]:
-            fail("customize build-inputs configuration URL differs from config/build.json")
         if resolved_target != target_id:
             fail(
                 f"customize build-inputs board map resolved {resolved_target!r}, "
@@ -205,11 +184,20 @@ def main() -> None:
     build = load_json("config/build.json")
     targets_document = load_json("config/targets.json")
     schema = load_json("schemas/receiver-config.schema.json")
-    example = load_json("examples/config-server/config/default.json")
+    example = load_json("examples/local-config.json")
+    factory = load_json("userpatches/overlay/usr/share/adsb-receiver/default-config.json")
 
-    errors = sorted(Draft202012Validator(schema).iter_errors(example), key=lambda error: list(error.path))
-    if errors:
-        fail("example configuration violates receiver-config.schema.json: " + errors[0].message)
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    for label, document in (("example", example), ("factory", factory)):
+        errors = sorted(validator.iter_errors(document), key=lambda error: list(error.path))
+        if errors:
+            fail(f"{label} configuration violates receiver-config.schema.json: {errors[0].message}")
+    if factory.get("setupComplete") is not False:
+        fail("factory configuration must enter configuration mode on first boot")
+    if factory.get("listeners", {}).get("beast", {}).get("port") != 30005:
+        fail("factory Beast listener must default to TCP 30005")
+    if factory.get("listeners", {}).get("jsonHttp", {}).get("port") != 8080:
+        fail("factory JSON HTTP listener must default to TCP 8080")
 
     targets = targets_document.get("targets") if isinstance(targets_document, dict) else None
     if not isinstance(targets, dict) or not targets:
@@ -266,13 +254,6 @@ def main() -> None:
     validate_customize_build_inputs(build, targets)
     validate_systemd_units()
 
-    placeholders = production_placeholders(build)
-    if placeholders:
-        message = "; ".join(placeholders)
-        if args.production:
-            fail(f"production build blocked: {message}")
-        print(f"warning: production build remains blocked: {message}", file=sys.stderr)
-
     workflows = ROOT / ".github" / "workflows"
     for workflow in workflows.glob("*.yml"):
         for line in workflow.read_text().splitlines():
@@ -316,7 +297,7 @@ def main() -> None:
         fail("obsolete Gitea image-build workflow is still enabled")
 
     readme = (ROOT / "README.md").read_text()
-    for phrase in ("reproducible", "Armbian", "Orange Pi Zero 3", "GitHub Actions", "last-known-good"):
+    for phrase in ("reproducible", "Armbian", "Orange Pi Zero3", "Orange Pi Zero2", "GitHub Actions", "last-known-good", "30005", "8080", "8443", "NetworkManager"):
         if phrase not in readme:
             fail(f"README is missing required project documentation: {phrase}")
 
@@ -326,8 +307,29 @@ def main() -> None:
     if TOKEN.search(text):
         fail("tracked access token detected")
     readsb_unit = (ROOT / "userpatches/overlay/etc/systemd/system/readsb.service").read_text()
-    if "Wants=adsb-config-agent.service" not in readsb_unit or "Requires=adsb-config-agent.service" in readsb_unit:
-        fail("readsb must want, not require, a configuration fetch so cached configuration survives outages")
+    if "adsb-config-agent" in readsb_unit or "network-online.target" in readsb_unit:
+        fail("readsb startup must not depend on the retired remote configuration path or internet access")
+    required_runtime = {
+        "usr/local/sbin/adsb-config",
+        "usr/local/sbin/adsb-network-mode",
+        "usr/local/sbin/adsb-json-server",
+        "usr/local/sbin/adsb-admin-server",
+        "usr/local/sbin/adsb-readsb",
+    }
+    overlay = ROOT / "userpatches/overlay"
+    for relative in required_runtime:
+        runtime = overlay / relative
+        if not runtime.is_file():
+            fail(f"runtime component is missing: {relative}")
+        if not runtime.stat().st_mode & 0o111:
+            fail(f"runtime component is not executable: {relative}")
+    retired_files = [
+        ROOT / "userpatches/overlay/usr/local/sbin/adsb-config-agent",
+        ROOT / "userpatches/overlay/etc/systemd/system/adsb-config-refresh.timer",
+    ]
+    retired_example = ROOT / "examples/config-server"
+    if any(path.exists() for path in retired_files) or (retired_example.exists() and any(path.is_file() for path in retired_example.rglob("*"))):
+        fail("retired mandatory remote-configuration artifacts remain in the repository")
     if 'install -m 0600 /tmp/overlay/etc/adsb-receiver/admin-authorized_keys' not in customize_script:
         fail("customize-image.sh must install administrator keys from Armbian's overlay mount")
     if "ADSB_ADMIN_AUTHORIZED_KEYS" in customize_script:

@@ -1,6 +1,0 @@
-:443 {
-  encode zstd gzip
-  header Cache-Control "public, max-age=300"
-  root * /srv/config
-  file_server
-}

@@ -1,0 +1,17 @@
+[Unit]
+Description=Restrict ADS-B listener ports to private LAN sources
+After=adsb-initialize.service
+Requires=adsb-initialize.service
+Before=readsb.service adsb-json-http.service adsb-admin.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/adsb-config firewall
+RemainAfterExit=yes
+User=root
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/adsb-receiver
+
+[Install]
+WantedBy=multi-user.target

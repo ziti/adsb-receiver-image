@@ -1,0 +1,19 @@
+[Unit]
+Description=Read-only HTTP service for readsb JSON files
+After=readsb.service
+Requires=readsb.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/adsb-json-server
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

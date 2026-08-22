@@ -1,0 +1,17 @@
+[Unit]
+Description=Initialize local ADS-B receiver configuration
+Before=readsb.service adsb-firewall.service adsb-network-mode.service adsb-json-http.service adsb-admin.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/adsb-config initialize
+RemainAfterExit=yes
+User=root
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/etc/adsb-receiver /var/lib/adsb-receiver /run/adsb-receiver
+
+[Install]
+WantedBy=multi-user.target

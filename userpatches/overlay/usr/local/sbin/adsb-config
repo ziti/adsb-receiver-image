@@ -1,0 +1,481 @@
+#!/usr/bin/python3
+"""Validate, apply, recover, and inspect the local receiver configuration."""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import hmac
+import ipaddress
+import json
+import logging
+import os
+from pathlib import Path
+import re
+import secrets
+import stat
+import subprocess
+import tempfile
+import time
+import uuid
+
+ETC = Path(os.environ.get("ADSB_ETC", "/etc/adsb-receiver"))
+STATE = Path(os.environ.get("ADSB_STATE", "/var/lib/adsb-receiver"))
+RUN = Path(os.environ.get("ADSB_RUN", "/run/adsb-receiver"))
+BOOT = Path(os.environ.get("ADSB_BOOT", "/boot/adsb-receiver"))
+DEFAULT_CONFIG = Path(os.environ.get("ADSB_DEFAULT_CONFIG", "/usr/share/adsb-receiver/default-config.json"))
+NM_CONNECTIONS = Path(os.environ.get("ADSB_NM_CONNECTIONS", "/etc/NetworkManager/system-connections"))
+RECOVERY_TEXT = b"ADSB-RECEIVER-CONFIG-MODE\n"
+HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$")
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,62}$")
+IFACE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,15}$")
+LOG = logging.getLogger("adsb-config")
+
+
+def atomic_write(path: Path, data: bytes, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".adsb-new-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as output:
+            output.write(data)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def canonical(config: dict) -> bytes:
+    return (json.dumps(config, indent=2, sort_keys=True) + "\n").encode()
+
+
+def exact_keys(value: object, required: set[str], optional: set[str] = set(), label: str = "object") -> dict:
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be an object")
+    missing = required - value.keys()
+    extra = value.keys() - required - optional
+    if missing:
+        raise ValueError(f"{label} is missing: {', '.join(sorted(missing))}")
+    if extra:
+        raise ValueError(f"{label} contains unsupported fields: {', '.join(sorted(extra))}")
+    return value
+
+
+def number(value: object, low: float, high: float, label: str, nullable: bool = False) -> None:
+    if nullable and value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= value <= high:
+        raise ValueError(f"{label} must be between {low} and {high}")
+
+
+def integer(value: object, low: int, high: int, label: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+        raise ValueError(f"{label} must be an integer between {low} and {high}")
+
+
+def boolean(value: object, label: str) -> None:
+    if not isinstance(value, bool):
+        raise ValueError(f"{label} must be boolean")
+
+
+def interface_name(value: object, label: str) -> None:
+    if not isinstance(value, str) or not IFACE_RE.fullmatch(value):
+        raise ValueError(f"{label} is not a valid interface name")
+
+
+def ipv4(value: object, label: str, allow_unspecified: bool = True) -> ipaddress.IPv4Address:
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError as error:
+        raise ValueError(f"{label} must be an IPv4 address") from error
+    if not isinstance(address, ipaddress.IPv4Address):
+        raise ValueError(f"{label} must be an IPv4 address")
+    if address.is_multicast or address.is_reserved or (address.is_unspecified and not allow_unspecified):
+        raise ValueError(f"{label} is not an allowed bind address")
+    if not (address.is_unspecified or address.is_private or address.is_loopback or address.is_link_local):
+        raise ValueError(f"{label} must be local, private, or 0.0.0.0")
+    return address
+
+
+def validate(config: object) -> dict:
+    root = exact_keys(
+        config,
+        {"schemaVersion", "setupComplete", "receiver", "network", "listeners", "admin", "configurationMode", "advanced"},
+        {"outboundConnectors"},
+        "configuration",
+    )
+    if root["schemaVersion"] != 2:
+        raise ValueError("schemaVersion must be 2")
+    boolean(root["setupComplete"], "setupComplete")
+
+    receiver = exact_keys(root["receiver"], {"name", "latitude", "longitude", "altitudeMeters", "gain", "device"}, label="receiver")
+    if not isinstance(receiver["name"], str) or not NAME_RE.fullmatch(receiver["name"]):
+        raise ValueError("receiver.name must be 1..63 safe display characters")
+    number(receiver["latitude"], -90, 90, "receiver.latitude", nullable=True)
+    number(receiver["longitude"], -180, 180, "receiver.longitude", nullable=True)
+    number(receiver["altitudeMeters"], -1000, 20000, "receiver.altitudeMeters", nullable=True)
+    if root["setupComplete"] and any(receiver[key] is None for key in ("latitude", "longitude", "altitudeMeters")):
+        raise ValueError("completed setup requires latitude, longitude, and altitudeMeters")
+    if receiver["gain"] != "auto":
+        number(receiver["gain"], 0, 58, "receiver.gain")
+    if receiver["device"] != "auto":
+        integer(receiver["device"], 0, 31, "receiver.device")
+
+    network = exact_keys(root["network"], {"ethernet", "wifi"}, label="network")
+    ethernet = exact_keys(network["ethernet"], {"enabled", "interface"}, label="network.ethernet")
+    wifi = exact_keys(network["wifi"], {"configured", "interface"}, label="network.wifi")
+    boolean(ethernet["enabled"], "network.ethernet.enabled")
+    boolean(wifi["configured"], "network.wifi.configured")
+    interface_name(ethernet["interface"], "network.ethernet.interface")
+    interface_name(wifi["interface"], "network.wifi.interface")
+    if ethernet["interface"] == wifi["interface"]:
+        raise ValueError("Ethernet and Wi-Fi interfaces must differ")
+
+    listeners = exact_keys(root["listeners"], {"beast", "jsonHttp"}, label="listeners")
+    active_ports = []
+    for key in ("beast", "jsonHttp"):
+        listener = exact_keys(listeners[key], {"enabled", "address", "port"}, label=f"listeners.{key}")
+        boolean(listener["enabled"], f"listeners.{key}.enabled")
+        ipv4(listener["address"], f"listeners.{key}.address")
+        integer(listener["port"], 1024, 65535, f"listeners.{key}.port")
+        if listener["enabled"]:
+            active_ports.append(listener["port"])
+
+    connectors = root.get("outboundConnectors", [])
+    if not isinstance(connectors, list) or len(connectors) > 16:
+        raise ValueError("outboundConnectors must be an array of at most 16 entries")
+    for index, connector_value in enumerate(connectors):
+        connector = exact_keys(connector_value, {"enabled", "host", "port", "protocol"}, label=f"outboundConnectors[{index}]")
+        boolean(connector["enabled"], f"outboundConnectors[{index}].enabled")
+        if not isinstance(connector["host"], str) or not HOST_RE.fullmatch(connector["host"]):
+            raise ValueError(f"outboundConnectors[{index}].host is invalid")
+        integer(connector["port"], 1, 65535, f"outboundConnectors[{index}].port")
+        if connector["protocol"] not in {"beast_out", "beast_reduce_plus_out"}:
+            raise ValueError(f"outboundConnectors[{index}].protocol is unsupported")
+
+    admin = exact_keys(root["admin"], {"enabled", "address", "port", "tls"}, label="admin")
+    boolean(admin["enabled"], "admin.enabled")
+    admin_address = ipv4(admin["address"], "admin.address", allow_unspecified=False)
+    integer(admin["port"], 1024, 65535, "admin.port")
+    if admin["tls"] is not True:
+        raise ValueError("run-mode administration requires TLS")
+    if admin["enabled"]:
+        active_ports.append(admin["port"])
+    if len(active_ports) != len(set(active_ports)):
+        raise ValueError("enabled Beast, JSON HTTP, and admin services require distinct ports")
+    if not (admin_address.is_loopback or admin_address.is_private or admin_address.is_link_local):
+        raise ValueError("admin.address must be loopback or a private management address")
+
+    mode = exact_keys(root["configurationMode"], {"apGateway", "apPrefixLength", "recoveryMarker"}, label="configurationMode")
+    if mode != {"apGateway": "192.168.77.1", "apPrefixLength": 24, "recoveryMarker": "/boot/adsb-receiver/recovery-request"}:
+        raise ValueError("configurationMode network and marker are fixed appliance safety contracts")
+    advanced = exact_keys(root["advanced"], {"ppm", "maxRangeNmi"}, label="advanced")
+    integer(advanced["ppm"], -200, 200, "advanced.ppm")
+    integer(advanced["maxRangeNmi"], 1, 500, "advanced.maxRangeNmi")
+    return root
+
+
+def render_args(config: dict) -> str:
+    config = validate(config)
+    receiver = config["receiver"]
+    args = [
+        "--quiet", "--device-type", "rtlsdr", "--gain", str(receiver["gain"]),
+        "--ppm", str(config["advanced"]["ppm"]), "--max-range", str(config["advanced"]["maxRangeNmi"]),
+        "--write-json", "/run/readsb", "--write-json-every", "1",
+    ]
+    if receiver["device"] != "auto":
+        args += ["--device", str(receiver["device"])]
+    if receiver["latitude"] is not None:
+        args += ["--lat", str(receiver["latitude"]), "--lon", str(receiver["longitude"])]
+    beast = config["listeners"]["beast"]
+    connectors = [item for item in config.get("outboundConnectors", []) if item["enabled"]]
+    if beast["enabled"] or connectors:
+        args += ["--net"]
+    if beast["enabled"]:
+        args += ["--net-bind-address", beast["address"], "--net-bo-port", str(beast["port"])]
+    for connector in connectors:
+        args += ["--net-connector", f"{connector['host']},{connector['port']},{connector['protocol']}"]
+    return "\n".join(args) + "\n"
+
+
+def redact(value: object) -> object:
+    if isinstance(value, dict):
+        return {key: ("[redacted]" if any(word in key.lower() for word in ("password", "secret", "token", "authorization", "psk")) else redact(item)) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact(item) for item in value]
+    return value
+
+
+def record_error(operation: str, error: Exception) -> None:
+    document = {"time": int(time.time()), "operation": operation, "error": str(redact(str(error)))[:500]}
+    atomic_write(STATE / "last-apply-error.json", canonical(document))
+
+
+def run_systemctl(*arguments: str, check: bool = False) -> subprocess.CompletedProcess:
+    return subprocess.run(["systemctl", *arguments], check=check, capture_output=True, text=True)
+
+
+def firewall_rules(config: dict) -> str:
+    ports = [item["port"] for item in config["listeners"].values() if item["enabled"]]
+    admin = config["admin"]
+    if admin["enabled"] and not ipaddress.ip_address(admin["address"]).is_loopback:
+        ports.append(admin["port"])
+    port_set = ", ".join(str(port) for port in sorted(set(ports))) or "0"
+    return f"""table inet adsb_receiver {{
+  chain input {{
+    type filter hook input priority filter; policy accept;
+    tcp dport {{ {port_set} }} ip saddr != {{ 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 }} drop
+    tcp dport {{ {port_set} }} ip6 saddr != {{ fc00::/7, fe80::/10 }} drop
+  }}
+}}
+"""
+
+
+def apply(config_path: Path, initial: bool = False) -> bool:
+    config = validate(json.loads(config_path.read_text()))
+    if not initial and config["setupComplete"] and config["admin"]["enabled"] and not (ETC / "admin-password.json").exists():
+        raise ValueError("an administrator credential must be created before enabling run-mode administration")
+    rendered_config = canonical(config)
+    rendered_args = render_args(config).encode()
+    active = ETC / "config.json"
+    args_path = STATE / "readsb.args"
+    if active.exists() and active.read_bytes() == rendered_config and args_path.exists() and args_path.read_bytes() == rendered_args:
+        return False
+    old_config = active.read_bytes() if active.exists() else None
+    old_args = args_path.read_bytes() if args_path.exists() else None
+    try:
+        if old_config is not None:
+            atomic_write(STATE / "previous-config.json", old_config)
+        if old_args is not None:
+            atomic_write(STATE / "previous-readsb.args", old_args, 0o644)
+        atomic_write(active, rendered_config)
+        atomic_write(args_path, rendered_args, 0o644)
+        atomic_write(STATE / "firewall.nft", firewall_rules(config).encode(), 0o600)
+        if not initial:
+            for unit in ("adsb-firewall.service", "readsb.service", "adsb-json-http.service"):
+                run_systemctl("try-restart", unit)
+            required_active = ["readsb.service"]
+            if config["listeners"]["jsonHttp"]["enabled"]:
+                required_active.append("adsb-json-http.service")
+            for unit in required_active:
+                result = run_systemctl("is-active", "--quiet", unit)
+                if result.returncode:
+                    raise RuntimeError(f"{unit} did not become active")
+        atomic_write(STATE / "last-known-good.json", rendered_config)
+        if (STATE / "last-apply-error.json").exists():
+            os.unlink(STATE / "last-apply-error.json")
+        return True
+    except Exception as error:
+        if old_config is not None:
+            atomic_write(active, old_config)
+        if old_args is not None:
+            atomic_write(args_path, old_args, 0o644)
+        if not initial:
+            run_systemctl("try-restart", "readsb.service")
+        record_error("apply", error)
+        raise
+
+
+def rollback() -> None:
+    source = STATE / "last-known-good.json"
+    if not source.exists():
+        raise RuntimeError("no last-known-good configuration is available")
+    apply(source)
+
+
+def marker_valid(marker: Path | None = None) -> bool:
+    marker = marker or (BOOT / "recovery-request")
+    try:
+        info = marker.lstat()
+        return stat.S_ISREG(info.st_mode) and not marker.is_symlink() and marker.read_bytes() == RECOVERY_TEXT
+    except OSError:
+        return False
+
+
+def configuration_mode(config: dict, marker: Path | None = None) -> bool:
+    return not config["setupComplete"] or marker_valid(marker)
+
+
+def request_recovery() -> None:
+    atomic_write(BOOT / "recovery-request", RECOVERY_TEXT, 0o600)
+
+
+def consume_recovery_marker() -> None:
+    marker = BOOT / "recovery-request"
+    if marker_valid(marker):
+        os.unlink(marker)
+
+
+def hash_password(password: str) -> dict:
+    if len(password) < 12 or len(password) > 256:
+        raise ValueError("administrator password must be 12..256 characters")
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode(), salt=salt, n=16384, r=8, p=1, dklen=32)
+    return {"algorithm": "scrypt", "n": 16384, "r": 8, "p": 1, "salt": base64.b64encode(salt).decode(), "hash": base64.b64encode(digest).decode()}
+
+
+def password_matches(password: str, credential: dict) -> bool:
+    try:
+        digest = hashlib.scrypt(password.encode(), salt=base64.b64decode(credential["salt"]), n=credential["n"], r=credential["r"], p=credential["p"], dklen=32)
+        return hmac.compare_digest(digest, base64.b64decode(credential["hash"]))
+    except (KeyError, ValueError, TypeError):
+        return False
+
+
+def basic_authorized(header: str | None, credential: dict, username: str = "admin") -> bool:
+    if not header or not header.startswith("Basic "):
+        return False
+    try:
+        decoded = base64.b64decode(header[6:], validate=True).decode()
+        supplied_user, supplied_password = decoded.split(":", 1)
+    except (ValueError, UnicodeDecodeError):
+        return False
+    return hmac.compare_digest(supplied_user, username) and password_matches(supplied_password, credential)
+
+
+def csrf_valid(header_token: str | None, cookie_token: str | None, expected: str, origin: str | None, host: str) -> bool:
+    if not header_token or not cookie_token or not origin or not origin.startswith("https://"):
+        return False
+    try:
+        origin_host = origin.split("//", 1)[1].split("/", 1)[0]
+    except IndexError:
+        return False
+    return origin_host == host and hmac.compare_digest(header_token, expected) and hmac.compare_digest(cookie_token, expected)
+
+
+def escape_keyfile(value: str, label: str) -> str:
+    if not value or any(ord(character) < 32 for character in value):
+        raise ValueError(f"{label} contains unsupported control characters")
+    return value.replace("\\", "\\\\").replace(";", "\\;")
+
+
+def wifi_keyfile(ssid: str, password: str, interface: str, connection_id: str = "adsb-wifi") -> bytes:
+    if not 1 <= len(ssid.encode()) <= 32:
+        raise ValueError("Wi-Fi SSID must be 1..32 bytes")
+    if not 8 <= len(password) <= 63:
+        raise ValueError("Wi-Fi password must be 8..63 characters")
+    interface_name(interface, "Wi-Fi interface")
+    return f"""[connection]
+id={connection_id}
+uuid={uuid.uuid4()}
+type=wifi
+interface-name={interface}
+autoconnect=true
+autoconnect-priority=10
+
+[wifi]
+mode=infrastructure
+ssid={escape_keyfile(ssid, 'Wi-Fi SSID')}
+
+[wifi-security]
+key-mgmt=wpa-psk
+psk={escape_keyfile(password, 'Wi-Fi password')}
+
+[ipv4]
+method=auto
+route-metric=600
+
+[ipv6]
+method=auto
+route-metric=600
+""".encode()
+
+
+def configure_wifi(ssid: str, password: str, interface: str) -> None:
+    candidate = RUN / "adsb-wifi-candidate.nmconnection"
+    atomic_write(candidate, wifi_keyfile(ssid, password, interface, "adsb-wifi-candidate"), 0o600)
+    try:
+        subprocess.run(["nmcli", "connection", "load", str(candidate)], check=True, capture_output=True, text=True)
+        subprocess.run(["nmcli", "connection", "up", "adsb-wifi-candidate"], check=True, capture_output=True, text=True, timeout=45)
+        final = NM_CONNECTIONS / "adsb-wifi.nmconnection"
+        atomic_write(final, wifi_keyfile(ssid, password, interface), 0o600)
+        subprocess.run(["nmcli", "connection", "load", str(final)], check=True, capture_output=True, text=True)
+        subprocess.run(["nmcli", "connection", "up", "adsb-wifi"], check=True, capture_output=True, text=True, timeout=45)
+        subprocess.run(["nmcli", "connection", "delete", "adsb-wifi-candidate"], check=False, capture_output=True, text=True)
+    finally:
+        if candidate.exists():
+            os.unlink(candidate)
+
+
+def status_document() -> dict:
+    config = validate(json.loads((ETC / "config.json").read_text()))
+    def command(arguments: list[str]) -> str:
+        result = subprocess.run(arguments, capture_output=True, text=True, timeout=5)
+        return result.stdout.strip() if result.returncode == 0 else "unavailable"
+    error = None
+    if (STATE / "last-apply-error.json").exists():
+        error = json.loads((STATE / "last-apply-error.json").read_text())
+    try:
+        current_mode = (RUN / "mode").read_text().strip()
+    except OSError:
+        current_mode = "configuration" if configuration_mode(config) else "run"
+    if current_mode not in {"configuration", "run"}:
+        current_mode = "configuration" if configuration_mode(config) else "run"
+    return {
+        "mode": current_mode,
+        "services": {name: command(["systemctl", "is-active", name]) for name in ("readsb.service", "adsb-json-http.service", "adsb-admin.service")},
+        "sdr": command(["lsusb", "-d", "0bda:2838"]),
+        "network": command(["nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status"]),
+        "endpoints": {
+            "beast": config["listeners"]["beast"],
+            "jsonHttp": config["listeners"]["jsonHttp"],
+            "admin": config["admin"],
+        },
+        "lastApplyError": redact(error),
+    }
+
+
+def initialize() -> None:
+    ETC.mkdir(parents=True, exist_ok=True)
+    STATE.mkdir(parents=True, exist_ok=True)
+    RUN.mkdir(parents=True, exist_ok=True)
+    if not (ETC / "config.json").exists():
+        apply(DEFAULT_CONFIG, initial=True)
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(name)s: %(levelname)s: %(message)s")
+    parser = argparse.ArgumentParser()
+    subcommands = parser.add_subparsers(dest="command", required=True)
+    for command in ("validate", "apply"):
+        item = subcommands.add_parser(command)
+        item.add_argument("file", type=Path)
+    subcommands.add_parser("initialize")
+    subcommands.add_parser("status")
+    subcommands.add_parser("rollback")
+    subcommands.add_parser("request-recovery")
+    subcommands.add_parser("firewall")
+    args = parser.parse_args()
+    if args.command == "validate":
+        validate(json.loads(args.file.read_text()))
+    elif args.command == "apply":
+        apply(args.file)
+    elif args.command == "initialize":
+        initialize()
+    elif args.command == "status":
+        print(json.dumps(status_document(), indent=2))
+    elif args.command == "rollback":
+        rollback()
+    elif args.command == "request-recovery":
+        request_recovery()
+    elif args.command == "firewall":
+        config = validate(json.loads((ETC / "config.json").read_text()))
+        exists = subprocess.run(["nft", "list", "table", "inet", "adsb_receiver"], check=False, capture_output=True).returncode == 0
+        batch = ("delete table inet adsb_receiver\n" if exists else "") + firewall_rules(config)
+        subprocess.run(["nft", "-f", "-"], input=batch, text=True, check=True)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as error:
+        LOG.error("%s", error)
+        raise SystemExit(1)

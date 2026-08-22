@@ -30,8 +30,17 @@ jobs:
 
       - name: Check shell scripts
         run: |
-          bash -n build.sh userpatches/customize-image.sh examples/config-server/scripts/sign-config.sh
-          shellcheck build.sh userpatches/customize-image.sh examples/config-server/scripts/sign-config.sh
+          bash -n build.sh userpatches/customize-image.sh userpatches/extensions/adsb-kernel-pin.sh userpatches/overlay/etc/adsb-receiver/build-inputs.sh
+          shellcheck build.sh userpatches/customize-image.sh userpatches/extensions/adsb-kernel-pin.sh userpatches/overlay/etc/adsb-receiver/build-inputs.sh
 
-      - name: Run configuration-agent tests
+      - name: Run appliance configuration tests
         run: python -m unittest discover -s tests -v
+
+      - name: Compile appliance Python
+        run: |
+          python -m py_compile \
+            scripts/validate_repository.py \
+            userpatches/overlay/usr/local/sbin/adsb-config \
+            userpatches/overlay/usr/local/sbin/adsb-network-mode \
+            userpatches/overlay/usr/local/sbin/adsb-json-server \
+            userpatches/overlay/usr/local/sbin/adsb-admin-server

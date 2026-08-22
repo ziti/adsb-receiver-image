@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 2,
+  "setupComplete": true,
+  "receiver": {
+    "name": "garage-receiver",
+    "latitude": 41.8781,
+    "longitude": -87.6298,
+    "altitudeMeters": 181,
+    "gain": "auto",
+    "device": "auto"
+  },
+  "network": {
+    "ethernet": {"enabled": true, "interface": "end0"},
+    "wifi": {"configured": true, "interface": "wlan0"}
+  },
+  "listeners": {
+    "beast": {"enabled": true, "address": "0.0.0.0", "port": 30005},
+    "jsonHttp": {"enabled": true, "address": "0.0.0.0", "port": 8080}
+  },
+  "outboundConnectors": [],
+  "admin": {"enabled": true, "address": "127.0.0.1", "port": 8443, "tls": true},
+  "configurationMode": {
+    "apGateway": "192.168.77.1",
+    "apPrefixLength": 24,
+    "recoveryMarker": "/boot/adsb-receiver/recovery-request"
+  },
+  "advanced": {"ppm": 0, "maxRangeNmi": 300}
+}

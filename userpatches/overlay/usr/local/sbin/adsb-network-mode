@@ -1,0 +1,166 @@
+#!/usr/bin/python3
+"""Prepare NetworkManager for explicit configuration or normal run mode."""
+
+import importlib.machinery
+import importlib.util
+import ipaddress
+import json
+import os
+from pathlib import Path
+import secrets
+import subprocess
+
+MODULE_PATH = "/usr/local/sbin/adsb-config"
+spec = importlib.util.spec_from_loader("adsb_config", importlib.machinery.SourceFileLoader("adsb_config", MODULE_PATH))
+config_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(config_module)
+
+
+def machine_suffix() -> str:
+    try:
+        value = Path("/etc/machine-id").read_text().strip()
+    except OSError:
+        value = secrets.token_hex(3)
+    return value[-6:].upper()
+
+
+def ensure_tls() -> str:
+    certificate = config_module.ETC / "admin-cert.pem"
+    key = config_module.ETC / "admin-key.pem"
+    if not certificate.exists() or not key.exists():
+        subprocess.run(
+            ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "825", "-subj", "/CN=adsb-receiver.local", "-keyout", str(key), "-out", str(certificate)],
+            check=True,
+            capture_output=True,
+        )
+        os.chmod(key, 0o600)
+        os.chmod(certificate, 0o644)
+    result = subprocess.run(["openssl", "x509", "-in", str(certificate), "-noout", "-fingerprint", "-sha256"], check=True, capture_output=True, text=True)
+    return result.stdout.strip().split("=", 1)[-1]
+
+
+def ensure_bootstrap(url: str) -> dict:
+    state_path = config_module.STATE / "bootstrap-state.json"
+    credential_path = config_module.BOOT / "setup-credentials.txt"
+    if state_path.exists():
+        state = json.loads(state_path.read_text())
+        if credential_path.exists():
+            ensure_tls()
+            return state
+    else:
+        state = {
+            "ssid": "ADSB-SETUP-" + machine_suffix(),
+            "apPassword": secrets.token_urlsafe(12)[:16],
+        }
+    setup_password = secrets.token_urlsafe(18)
+    state["credential"] = config_module.hash_password(setup_password)
+    config_module.atomic_write(state_path, config_module.canonical(state))
+    fingerprint = ensure_tls()
+    credential_text = (
+        "ADS-B receiver configuration mode\n"
+        f"SSID: {state['ssid']}\n"
+        f"Wi-Fi password: {state['apPassword']}\n"
+        f"Setup URL: {url}\n"
+        "Setup username: setup\n"
+        f"Setup password: {setup_password}\n"
+        f"TLS certificate SHA-256 fingerprint: {fingerprint}\n"
+        "Delete this file after setup if the appliance could not remove it automatically.\n"
+    )
+    config_module.atomic_write(credential_path, credential_text.encode(), 0o600)
+    return state
+
+
+def wired_address(interface: str) -> str | None:
+    result = subprocess.run(["ip", "-json", "address", "show", "dev", interface], capture_output=True, text=True)
+    if result.returncode:
+        return None
+    try:
+        records = json.loads(result.stdout)
+        for address in records[0].get("addr_info", []):
+            candidate = ipaddress.ip_address(address.get("local", ""))
+            if address.get("family") == "inet" and not candidate.is_loopback and not candidate.is_link_local and address.get("scope") == "global":
+                return str(candidate)
+    except (ValueError, IndexError, json.JSONDecodeError):
+        return None
+    return None
+
+
+def ap_profile(state: dict, interface: str) -> bytes:
+    return f"""[connection]
+id=adsb-setup-ap
+type=wifi
+interface-name={interface}
+autoconnect=false
+
+[wifi]
+mode=ap
+ssid={config_module.escape_keyfile(state['ssid'], 'setup SSID')}
+
+[wifi-security]
+key-mgmt=wpa-psk
+psk={config_module.escape_keyfile(state['apPassword'], 'setup AP password')}
+
+[ipv4]
+method=shared
+address1=192.168.77.1/24
+
+[ipv6]
+method=disabled
+""".encode()
+
+
+def activate_ap(state: dict, interface: str) -> None:
+    profile = config_module.NM_CONNECTIONS / "adsb-setup-ap.nmconnection"
+    config_module.atomic_write(profile, ap_profile(state, interface), 0o600)
+    subprocess.run(["nmcli", "connection", "load", str(profile)], check=True, capture_output=True, text=True)
+    subprocess.run(["nmcli", "connection", "up", "adsb-setup-ap"], check=True, capture_output=True, text=True)
+
+
+def deactivate_ap() -> None:
+    subprocess.run(["nmcli", "connection", "down", "adsb-setup-ap"], check=False, capture_output=True, text=True)
+
+
+def prefer_ethernet(interface: str) -> None:
+    result = subprocess.run(["nmcli", "-g", "GENERAL.CONNECTION", "device", "show", interface], capture_output=True, text=True)
+    connection = result.stdout.strip()
+    if result.returncode == 0 and connection and connection != "--":
+        subprocess.run(["nmcli", "connection", "modify", connection, "ipv4.route-metric", "100", "ipv6.route-metric", "100"], check=False, capture_output=True, text=True)
+
+
+def prepare() -> None:
+    config_module.initialize()
+    config = config_module.validate(json.loads((config_module.ETC / "config.json").read_text()))
+    config_module.RUN.mkdir(parents=True, exist_ok=True)
+    if config_module.configuration_mode(config):
+        subprocess.run(["nm-online", "--quiet", "--timeout=20"], check=False, capture_output=True)
+        address = wired_address(config["network"]["ethernet"]["interface"]) if config["network"]["ethernet"]["enabled"] else None
+        if address:
+            deactivate_ap()
+            bind = address
+        else:
+            bind = config["configurationMode"]["apGateway"]
+        state = ensure_bootstrap(f"https://{bind}:8443/")
+        if not address:
+            activate_ap(state, config["network"]["wifi"]["interface"])
+        config_module.atomic_write(config_module.RUN / "mode", b"configuration\n", 0o644)
+        config_module.atomic_write(config_module.RUN / "admin-bind", (bind + "\n").encode(), 0o644)
+        config_module.consume_recovery_marker()
+    else:
+        deactivate_ap()
+        prefer_ethernet(config["network"]["ethernet"]["interface"])
+        config_module.atomic_write(config_module.RUN / "mode", b"run\n", 0o644)
+        config_module.atomic_write(config_module.RUN / "admin-bind", (config["admin"]["address"] + "\n").encode(), 0o644)
+
+
+def teardown() -> None:
+    deactivate_ap()
+    for path in (config_module.BOOT / "setup-credentials.txt", config_module.STATE / "bootstrap-state.json"):
+        if path.exists():
+            os.unlink(path)
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) != 2 or sys.argv[1] not in {"prepare", "teardown"}:
+        raise SystemExit("usage: adsb-network-mode prepare|teardown")
+    prepare() if sys.argv[1] == "prepare" else teardown()

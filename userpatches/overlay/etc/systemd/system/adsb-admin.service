@@ -1,0 +1,19 @@
+[Unit]
+Description=Authenticated ADS-B setup and administration UI
+After=adsb-network-mode.service adsb-initialize.service
+Requires=adsb-network-mode.service adsb-initialize.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/adsb-admin-server
+Restart=on-failure
+RestartSec=5s
+User=root
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/etc/adsb-receiver /etc/NetworkManager/system-connections /var/lib/adsb-receiver /run/adsb-receiver /boot/adsb-receiver
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

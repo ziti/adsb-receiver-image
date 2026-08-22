@@ -1,0 +1,19 @@
+[Unit]
+Description=Prepare explicit ADS-B configuration or run networking mode
+After=NetworkManager.service adsb-initialize.service
+Wants=NetworkManager.service
+Requires=adsb-initialize.service
+Before=adsb-admin.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/adsb-network-mode prepare
+RemainAfterExit=yes
+User=root
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/etc/adsb-receiver /etc/NetworkManager/system-connections /var/lib/adsb-receiver /run/adsb-receiver /boot/adsb-receiver
+
+[Install]
+WantedBy=multi-user.target

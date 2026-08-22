@@ -1,5 +1,5 @@
 {
-  "imageVersion": "2026.08.21.3",
+  "imageVersion": "2026.08.22.1",
   "armbian": {
     "repository": "https://github.com/armbian/build.git",
     "revision": "0620eb67885d19aeabd62655e60870ffd1efad63",
@@ -12,7 +12,6 @@
   "defaults": {
     "adminUser": "admin",
     "timezone": "America/Chicago",
-    "locale": "C.UTF-8",
-    "configUrlTemplate": "https://adsb-server.local/adsb/config/{receiver_id}.json"
+    "locale": "C.UTF-8"
   }
 }
