@@ -128,6 +128,36 @@ printf '%s' "${KERNELBRANCH:-}"
             )
 
 
+def validate_bootstrap_partition() -> None:
+    extension = ROOT / "userpatches/extensions/adsb-bootstrap-partition.sh"
+    inspector = ROOT / "scripts/inspect-built-image.sh"
+    if not extension.is_file() or not inspector.is_file():
+        fail("ADSB-BOOT partition extension or built-image inspector is missing")
+    text = extension.read_text()
+    for contract in (
+        "ADSB_BOOTSTRAP_MIB=128",
+        "ADSB_BOOTSTRAP_LABEL=ADSB-BOOT",
+        "ADSB_BOOTSTRAP_MOUNT=/boot/adsb-bootstrap",
+        "USE_HOOK_FOR_PARTITION=yes",
+        "mkfs.fat -F 32",
+        "type=0c",
+        "LABEL=%s %s vfat rw,nosuid,nodev,noexec,umask=0077",
+        "pre_umount_final_image__950_adsb_bootstrap_partition",
+        "pre_customize_image__950_adsb_repository_provenance",
+        'git -C "${custom_checkout}" rev-parse HEAD',
+        "schemas/receiver-config.schema.json",
+    ):
+        if contract not in text:
+            fail(f"bootstrap partition extension is missing contract: {contract}")
+    size = re.search(r"ADSB_BOOTSTRAP_MIB=(\d+)", text)
+    if not size or not 64 <= int(size.group(1)) <= 256:
+        fail("ADSB-BOOT partition must be 64..256 MiB")
+    for script in (extension, inspector):
+        result = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
+        if result.returncode:
+            fail(f"invalid shell syntax in {script.relative_to(ROOT)}: {result.stderr.strip()}")
+
+
 def validate_customize_build_inputs(build: dict[str, object], targets: dict[str, object]) -> None:
     """Check image inputs that cross Armbian's inner Docker/chroot boundary."""
     inputs = ROOT / "userpatches/overlay/etc/adsb-receiver/build-inputs.sh"
@@ -273,8 +303,12 @@ def main() -> None:
             fail("config/build.json Armbian revision must match every build workflow reference")
     if "armbian_version:" in build_workflow:
         fail("appliance image_version must not be passed to armbian_version")
-    if "armbian_extensions: adsb-kernel-pin" not in build_workflow:
-        fail("build workflow must enable the ADS-B kernel-pin Armbian extension")
+    if "armbian_extensions: adsb-kernel-pin,adsb-bootstrap-partition" not in build_workflow:
+        fail("build workflow must enable both ADS-B Armbian extensions")
+    if "scripts/inspect-built-image.sh" not in build_workflow:
+        fail("build workflow must inspect the partition layout after every image build")
+    if "armbian_release_prerelease: true" not in build_workflow or "needs: build" not in build_workflow or 'gh release edit "$IMAGE_VERSION" --prerelease=false --latest' not in build_workflow:
+        fail("build workflow must promote the shared release only after every inspected target succeeds")
     if re.search(r"^\s+ADSB_[A-Z_]+:\s+\$\{\{", build_workflow, re.MULTILINE):
         fail("build workflow must not pass arbitrary ADSB variables into Armbian's inner Docker boundary")
     if f"default: {build['imageVersion']}" not in build_workflow:
@@ -293,6 +327,7 @@ def main() -> None:
         if source_checkout not in build_workflow:
             fail("build manifest must record both Armbian framework and os checkout revisions")
     validate_kernel_pin_extension(targets)
+    validate_bootstrap_partition()
     if (ROOT / ".gitea" / "workflows" / "build-image.yml").exists():
         fail("obsolete Gitea image-build workflow is still enabled")
 

@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "setupComplete": false,
   "receiver": {
     "name": "adsb-receiver",
@@ -10,19 +10,19 @@
     "device": "auto"
   },
   "network": {
-    "ethernet": {"enabled": true, "interface": "end0"},
-    "wifi": {"configured": false, "interface": "wlan0"}
+    "ethernet": {"enabled": true, "interface": "end0", "ipv4": {"method": "dhcp", "address": null, "prefixLength": null, "gateway": null, "dns": []}},
+    "wifi": {"configured": false, "interface": "wlan0", "ipv4": {"method": "dhcp", "address": null, "prefixLength": null, "gateway": null, "dns": []}}
   },
   "listeners": {
     "beast": {"enabled": true, "address": "0.0.0.0", "port": 30005},
     "jsonHttp": {"enabled": true, "address": "0.0.0.0", "port": 8080}
   },
-  "outboundConnectors": [],
   "admin": {"enabled": true, "address": "127.0.0.1", "port": 8443, "tls": true},
   "configurationMode": {
     "apGateway": "192.168.77.1",
     "apPrefixLength": 24,
-    "recoveryMarker": "/boot/adsb-receiver/recovery-request"
+    "recoveryMarker": "/boot/adsb-bootstrap/recovery-request",
+    "factoryResetMarker": "/boot/adsb-bootstrap/factory-reset"
   },
   "advanced": {"ppm": 0, "maxRangeNmi": 300}
 }

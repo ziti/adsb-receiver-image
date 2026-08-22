@@ -33,7 +33,7 @@ apt-get install --no-install-recommends -y \
   git build-essential debhelper pkg-config fakeroot help2man libncurses-dev zlib1g-dev libzstd-dev libusb-1.0-0-dev librtlsdr-dev
 
 install -d -m 0750 /var/lib/adsb-receiver /etc/adsb-receiver
-install -d -m 0755 /run/adsb-receiver /run/readsb /boot/adsb-receiver
+install -d -m 0755 /run/adsb-receiver /run/readsb /boot/adsb-bootstrap
 git clone https://github.com/wiedehopf/readsb.git /usr/local/src/readsb
 git -C /usr/local/src/readsb checkout --detach "${ADSB_READSB_REVISION:?missing readsb revision}"
 (cd /usr/local/src/readsb && DEB_BUILD_OPTIONS=noddebs dpkg-buildpackage -b -ui -uc -us --build-profiles=rtlsdr)
@@ -52,12 +52,13 @@ ARMBIAN_REVISION=${ADSB_ARMBIAN_REVISION:?}
 DEBIAN_RELEASE=${debian_release}
 READSB_REVISION=${ADSB_READSB_REVISION:?}
 TARGET=${ADSB_TARGET:?}
+REPOSITORY_COMMIT=$(cat /etc/adsb-receiver/repository-commit 2>/dev/null || printf unavailable)
 EOF
 systemctl disable apt-daily.timer apt-daily-upgrade.timer || true
 ADSB_ETC=/etc/adsb-receiver \
 ADSB_STATE=/var/lib/adsb-receiver \
 ADSB_RUN=/run/adsb-receiver \
-ADSB_BOOT=/boot/adsb-receiver \
+ADSB_BOOT=/boot/adsb-bootstrap \
 ADSB_DEFAULT_CONFIG=/usr/share/adsb-receiver/default-config.json \
   /usr/local/sbin/adsb-config initialize
 systemctl enable NetworkManager.service adsb-initialize.service adsb-network-mode.service \

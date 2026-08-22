@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Validate, apply, recover, and inspect the local receiver configuration."""
+"""Validate, transactionally apply, recover, reset, and inspect the appliance."""
 
 from __future__ import annotations
 
@@ -14,23 +14,35 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
+import socket
 import stat
 import subprocess
+import tarfile
 import tempfile
 import time
+import urllib.request
 import uuid
 
 ETC = Path(os.environ.get("ADSB_ETC", "/etc/adsb-receiver"))
 STATE = Path(os.environ.get("ADSB_STATE", "/var/lib/adsb-receiver"))
 RUN = Path(os.environ.get("ADSB_RUN", "/run/adsb-receiver"))
-BOOT = Path(os.environ.get("ADSB_BOOT", "/boot/adsb-receiver"))
+BOOT = Path(os.environ.get("ADSB_BOOT", "/boot/adsb-bootstrap"))
 DEFAULT_CONFIG = Path(os.environ.get("ADSB_DEFAULT_CONFIG", "/usr/share/adsb-receiver/default-config.json"))
 NM_CONNECTIONS = Path(os.environ.get("ADSB_NM_CONNECTIONS", "/etc/NetworkManager/system-connections"))
 RECOVERY_TEXT = b"ADSB-RECEIVER-CONFIG-MODE\n"
-HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$")
+FACTORY_RESET_TEXT = b"ADSB-RECEIVER-FACTORY-RESET\n"
+RECOVERY_LATCH = "recovery-latch"
+FACTORY_RESET_LATCH = "factory-reset-latch"
+SETUP_PORT = 8443
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,62}$")
 IFACE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,15}$")
 LOG = logging.getLogger("adsb-config")
+RFC1918 = tuple(ipaddress.ip_network(value) for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+
+
+def is_rfc1918(address: ipaddress.IPv4Address) -> bool:
+    return any(address in network for network in RFC1918)
 
 
 def atomic_write(path: Path, data: bytes, mode: int = 0o600) -> None:
@@ -53,15 +65,14 @@ def atomic_write(path: Path, data: bytes, mode: int = 0o600) -> None:
             os.unlink(temporary)
 
 
-def canonical(config: dict) -> bytes:
-    return (json.dumps(config, indent=2, sort_keys=True) + "\n").encode()
+def canonical(document: object) -> bytes:
+    return (json.dumps(document, indent=2, sort_keys=True) + "\n").encode()
 
 
-def exact_keys(value: object, required: set[str], optional: set[str] = set(), label: str = "object") -> dict:
+def exact_keys(value: object, required: set[str], label: str) -> dict:
     if not isinstance(value, dict):
         raise ValueError(f"{label} must be an object")
-    missing = required - value.keys()
-    extra = value.keys() - required - optional
+    missing, extra = required - value.keys(), value.keys() - required
     if missing:
         raise ValueError(f"{label} is missing: {', '.join(sorted(missing))}")
     if extra:
@@ -81,103 +92,111 @@ def integer(value: object, low: int, high: int, label: str) -> None:
         raise ValueError(f"{label} must be an integer between {low} and {high}")
 
 
-def boolean(value: object, label: str) -> None:
-    if not isinstance(value, bool):
-        raise ValueError(f"{label} must be boolean")
-
-
 def interface_name(value: object, label: str) -> None:
     if not isinstance(value, str) or not IFACE_RE.fullmatch(value):
         raise ValueError(f"{label} is not a valid interface name")
 
 
-def ipv4(value: object, label: str, allow_unspecified: bool = True) -> ipaddress.IPv4Address:
+def local_ipv4(value: object, label: str, allow_unspecified: bool = True) -> ipaddress.IPv4Address:
     try:
         address = ipaddress.ip_address(value)
     except ValueError as error:
         raise ValueError(f"{label} must be an IPv4 address") from error
-    if not isinstance(address, ipaddress.IPv4Address):
-        raise ValueError(f"{label} must be an IPv4 address")
-    if address.is_multicast or address.is_reserved or (address.is_unspecified and not allow_unspecified):
-        raise ValueError(f"{label} is not an allowed bind address")
-    if not (address.is_unspecified or address.is_private or address.is_loopback or address.is_link_local):
-        raise ValueError(f"{label} must be local, private, or 0.0.0.0")
+    if not isinstance(address, ipaddress.IPv4Address) or address.is_multicast or address.is_reserved:
+        raise ValueError(f"{label} is not an allowed IPv4 address")
+    if address.is_unspecified and allow_unspecified:
+        return address
+    if address.is_loopback or address.is_link_local or is_rfc1918(address):
+        return address
+    raise ValueError(f"{label} must be local or RFC1918 private")
+
+
+def validate_ipv4_profile(value: object, label: str) -> dict:
+    profile = exact_keys(value, {"method", "address", "prefixLength", "gateway", "dns"}, label)
+    if profile["method"] not in {"dhcp", "static"}:
+        raise ValueError(f"{label}.method must be dhcp or static")
+    if not isinstance(profile["dns"], list) or len(profile["dns"]) > 4 or len(set(profile["dns"])) != len(profile["dns"]):
+        raise ValueError(f"{label}.dns must contain at most four unique IPv4 addresses")
+    for index, address in enumerate(profile["dns"]):
+        usable_ipv4(address, f"{label}.dns[{index}]")
+    if profile["method"] == "dhcp":
+        if any(profile[key] is not None for key in ("address", "prefixLength", "gateway")) or profile["dns"]:
+            raise ValueError(f"{label} DHCP fields must be null and DNS empty")
+    else:
+        address = usable_ipv4(profile["address"], f"{label}.address")
+        if address.is_loopback or address.is_link_local:
+            raise ValueError(f"{label}.address cannot be loopback or link-local")
+        integer(profile["prefixLength"], 1, 32, f"{label}.prefixLength")
+        if profile["gateway"] is not None:
+            usable_ipv4(profile["gateway"], f"{label}.gateway")
+    return profile
+
+
+def usable_ipv4(value: object, label: str) -> ipaddress.IPv4Address:
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError as error:
+        raise ValueError(f"{label} must be an IPv4 address") from error
+    if not isinstance(address, ipaddress.IPv4Address) or address.is_unspecified or address.is_multicast or address.is_reserved:
+        raise ValueError(f"{label} is not a usable IPv4 address")
     return address
 
 
 def validate(config: object) -> dict:
-    root = exact_keys(
-        config,
-        {"schemaVersion", "setupComplete", "receiver", "network", "listeners", "admin", "configurationMode", "advanced"},
-        {"outboundConnectors"},
-        "configuration",
-    )
-    if root["schemaVersion"] != 2:
-        raise ValueError("schemaVersion must be 2")
-    boolean(root["setupComplete"], "setupComplete")
-
-    receiver = exact_keys(root["receiver"], {"name", "latitude", "longitude", "altitudeMeters", "gain", "device"}, label="receiver")
+    root = exact_keys(config, {"schemaVersion", "setupComplete", "receiver", "network", "listeners", "admin", "configurationMode", "advanced"}, "configuration")
+    if root["schemaVersion"] != 3:
+        raise ValueError("schemaVersion must be 3")
+    if not isinstance(root["setupComplete"], bool):
+        raise ValueError("setupComplete must be boolean")
+    receiver = exact_keys(root["receiver"], {"name", "latitude", "longitude", "altitudeMeters", "gain", "device"}, "receiver")
     if not isinstance(receiver["name"], str) or not NAME_RE.fullmatch(receiver["name"]):
         raise ValueError("receiver.name must be 1..63 safe display characters")
-    number(receiver["latitude"], -90, 90, "receiver.latitude", nullable=True)
-    number(receiver["longitude"], -180, 180, "receiver.longitude", nullable=True)
-    number(receiver["altitudeMeters"], -1000, 20000, "receiver.altitudeMeters", nullable=True)
+    number(receiver["latitude"], -90, 90, "receiver.latitude", True)
+    number(receiver["longitude"], -180, 180, "receiver.longitude", True)
+    number(receiver["altitudeMeters"], -1000, 20000, "receiver.altitudeMeters", True)
     if root["setupComplete"] and any(receiver[key] is None for key in ("latitude", "longitude", "altitudeMeters")):
         raise ValueError("completed setup requires latitude, longitude, and altitudeMeters")
     if receiver["gain"] != "auto":
         number(receiver["gain"], 0, 58, "receiver.gain")
     if receiver["device"] != "auto":
         integer(receiver["device"], 0, 31, "receiver.device")
-
-    network = exact_keys(root["network"], {"ethernet", "wifi"}, label="network")
-    ethernet = exact_keys(network["ethernet"], {"enabled", "interface"}, label="network.ethernet")
-    wifi = exact_keys(network["wifi"], {"configured", "interface"}, label="network.wifi")
-    boolean(ethernet["enabled"], "network.ethernet.enabled")
-    boolean(wifi["configured"], "network.wifi.configured")
+    network = exact_keys(root["network"], {"ethernet", "wifi"}, "network")
+    ethernet = exact_keys(network["ethernet"], {"enabled", "interface", "ipv4"}, "network.ethernet")
+    wifi = exact_keys(network["wifi"], {"configured", "interface", "ipv4"}, "network.wifi")
+    if not isinstance(ethernet["enabled"], bool) or not isinstance(wifi["configured"], bool):
+        raise ValueError("network enabled/configured fields must be boolean")
     interface_name(ethernet["interface"], "network.ethernet.interface")
     interface_name(wifi["interface"], "network.wifi.interface")
     if ethernet["interface"] == wifi["interface"]:
         raise ValueError("Ethernet and Wi-Fi interfaces must differ")
-
-    listeners = exact_keys(root["listeners"], {"beast", "jsonHttp"}, label="listeners")
+    validate_ipv4_profile(ethernet["ipv4"], "network.ethernet.ipv4")
+    validate_ipv4_profile(wifi["ipv4"], "network.wifi.ipv4")
+    listeners = exact_keys(root["listeners"], {"beast", "jsonHttp"}, "listeners")
     active_ports = []
     for key in ("beast", "jsonHttp"):
-        listener = exact_keys(listeners[key], {"enabled", "address", "port"}, label=f"listeners.{key}")
-        boolean(listener["enabled"], f"listeners.{key}.enabled")
-        ipv4(listener["address"], f"listeners.{key}.address")
+        listener = exact_keys(listeners[key], {"enabled", "address", "port"}, f"listeners.{key}")
+        if not isinstance(listener["enabled"], bool):
+            raise ValueError(f"listeners.{key}.enabled must be boolean")
+        local_ipv4(listener["address"], f"listeners.{key}.address")
         integer(listener["port"], 1024, 65535, f"listeners.{key}.port")
         if listener["enabled"]:
             active_ports.append(listener["port"])
-
-    connectors = root.get("outboundConnectors", [])
-    if not isinstance(connectors, list) or len(connectors) > 16:
-        raise ValueError("outboundConnectors must be an array of at most 16 entries")
-    for index, connector_value in enumerate(connectors):
-        connector = exact_keys(connector_value, {"enabled", "host", "port", "protocol"}, label=f"outboundConnectors[{index}]")
-        boolean(connector["enabled"], f"outboundConnectors[{index}].enabled")
-        if not isinstance(connector["host"], str) or not HOST_RE.fullmatch(connector["host"]):
-            raise ValueError(f"outboundConnectors[{index}].host is invalid")
-        integer(connector["port"], 1, 65535, f"outboundConnectors[{index}].port")
-        if connector["protocol"] not in {"beast_out", "beast_reduce_plus_out"}:
-            raise ValueError(f"outboundConnectors[{index}].protocol is unsupported")
-
-    admin = exact_keys(root["admin"], {"enabled", "address", "port", "tls"}, label="admin")
-    boolean(admin["enabled"], "admin.enabled")
-    admin_address = ipv4(admin["address"], "admin.address", allow_unspecified=False)
+    admin = exact_keys(root["admin"], {"enabled", "address", "port", "tls"}, "admin")
+    if not isinstance(admin["enabled"], bool) or admin["tls"] is not True:
+        raise ValueError("run-mode administration enabled must be boolean and TLS must be true")
+    admin_address = local_ipv4(admin["address"], "admin.address", allow_unspecified=False)
+    if not (admin_address.is_loopback or is_rfc1918(admin_address)):
+        raise ValueError("admin.address must be loopback or RFC1918 private")
     integer(admin["port"], 1024, 65535, "admin.port")
-    if admin["tls"] is not True:
-        raise ValueError("run-mode administration requires TLS")
     if admin["enabled"]:
         active_ports.append(admin["port"])
     if len(active_ports) != len(set(active_ports)):
         raise ValueError("enabled Beast, JSON HTTP, and admin services require distinct ports")
-    if not (admin_address.is_loopback or admin_address.is_private or admin_address.is_link_local):
-        raise ValueError("admin.address must be loopback or a private management address")
-
-    mode = exact_keys(root["configurationMode"], {"apGateway", "apPrefixLength", "recoveryMarker"}, label="configurationMode")
-    if mode != {"apGateway": "192.168.77.1", "apPrefixLength": 24, "recoveryMarker": "/boot/adsb-receiver/recovery-request"}:
-        raise ValueError("configurationMode network and marker are fixed appliance safety contracts")
-    advanced = exact_keys(root["advanced"], {"ppm", "maxRangeNmi"}, label="advanced")
+    mode = exact_keys(root["configurationMode"], {"apGateway", "apPrefixLength", "recoveryMarker", "factoryResetMarker"}, "configurationMode")
+    expected = {"apGateway": "192.168.77.1", "apPrefixLength": 24, "recoveryMarker": "/boot/adsb-bootstrap/recovery-request", "factoryResetMarker": "/boot/adsb-bootstrap/factory-reset"}
+    if mode != expected:
+        raise ValueError("configurationMode network and marker paths are fixed safety contracts")
+    advanced = exact_keys(root["advanced"], {"ppm", "maxRangeNmi"}, "advanced")
     integer(advanced["ppm"], -200, 200, "advanced.ppm")
     integer(advanced["maxRangeNmi"], 1, 500, "advanced.maxRangeNmi")
     return root
@@ -186,48 +205,40 @@ def validate(config: object) -> dict:
 def render_args(config: dict) -> str:
     config = validate(config)
     receiver = config["receiver"]
-    args = [
-        "--quiet", "--device-type", "rtlsdr", "--gain", str(receiver["gain"]),
-        "--ppm", str(config["advanced"]["ppm"]), "--max-range", str(config["advanced"]["maxRangeNmi"]),
-        "--write-json", "/run/readsb", "--write-json-every", "1",
-    ]
+    arguments = ["--quiet", "--device-type", "rtlsdr", "--gain", str(receiver["gain"]), "--ppm", str(config["advanced"]["ppm"]), "--max-range", str(config["advanced"]["maxRangeNmi"]), "--write-json", "/run/readsb", "--write-json-every", "1"]
     if receiver["device"] != "auto":
-        args += ["--device", str(receiver["device"])]
+        arguments += ["--device", str(receiver["device"])]
     if receiver["latitude"] is not None:
-        args += ["--lat", str(receiver["latitude"]), "--lon", str(receiver["longitude"])]
+        arguments += ["--lat", str(receiver["latitude"]), "--lon", str(receiver["longitude"])]
     beast = config["listeners"]["beast"]
-    connectors = [item for item in config.get("outboundConnectors", []) if item["enabled"]]
-    if beast["enabled"] or connectors:
-        args += ["--net"]
     if beast["enabled"]:
-        args += ["--net-bind-address", beast["address"], "--net-bo-port", str(beast["port"])]
-    for connector in connectors:
-        args += ["--net-connector", f"{connector['host']},{connector['port']},{connector['protocol']}"]
-    return "\n".join(args) + "\n"
+        arguments += ["--net", "--net-bind-address", beast["address"], "--net-bo-port", str(beast["port"])]
+    return "\n".join(arguments) + "\n"
 
 
 def redact(value: object) -> object:
     if isinstance(value, dict):
-        return {key: ("[redacted]" if any(word in key.lower() for word in ("password", "secret", "token", "authorization", "psk")) else redact(item)) for key, item in value.items()}
+        return {key: ("[redacted]" if any(word in key.lower() for word in ("password", "secret", "token", "authorization", "psk", "hash", "credential")) else redact(item)) for key, item in value.items()}
     if isinstance(value, list):
         return [redact(item) for item in value]
     return value
 
 
-def record_error(operation: str, error: Exception) -> None:
-    document = {"time": int(time.time()), "operation": operation, "error": str(redact(str(error)))[:500]}
-    atomic_write(STATE / "last-apply-error.json", canonical(document))
+def record_error(operation: str, error: Exception, rollback: str = "not-attempted") -> None:
+    atomic_write(STATE / "last-apply-error.json", canonical({"time": int(time.time()), "operation": operation, "error": str(error)[:500], "rollback": rollback}))
 
 
 def run_systemctl(*arguments: str, check: bool = False) -> subprocess.CompletedProcess:
     return subprocess.run(["systemctl", *arguments], check=check, capture_output=True, text=True)
 
 
-def firewall_rules(config: dict) -> str:
+def firewall_rules(config: dict, setup_mode: bool = False) -> str:
     ports = [item["port"] for item in config["listeners"].values() if item["enabled"]]
     admin = config["admin"]
     if admin["enabled"] and not ipaddress.ip_address(admin["address"]).is_loopback:
         ports.append(admin["port"])
+    if setup_mode:
+        ports.append(SETUP_PORT)
     port_set = ", ".join(str(port) for port in sorted(set(ports))) or "0"
     return f"""table inet adsb_receiver {{
   chain input {{
@@ -239,48 +250,117 @@ def firewall_rules(config: dict) -> str:
 """
 
 
-def apply(config_path: Path, initial: bool = False) -> bool:
+def listener_host(address: str) -> str:
+    return "127.0.0.1" if address == "0.0.0.0" else address
+
+
+def health_probe(config: dict) -> list[str]:
+    errors = []
+    for unit in ("readsb.service", "adsb-json-http.service"):
+        enabled = unit == "readsb.service" or config["listeners"]["jsonHttp"]["enabled"]
+        if enabled and run_systemctl("is-active", "--quiet", unit).returncode:
+            errors.append(f"{unit} is not active")
+    beast = config["listeners"]["beast"]
+    if beast["enabled"]:
+        try:
+            with socket.create_connection((listener_host(beast["address"]), beast["port"]), timeout=0.5):
+                pass
+        except OSError as error:
+            errors.append(f"Beast listener unavailable: {error}")
+    json_listener = config["listeners"]["jsonHttp"]
+    if json_listener["enabled"]:
+        if not Path("/run/readsb/receiver.json").is_file():
+            errors.append("readsb receiver.json has not been produced")
+        try:
+            with urllib.request.urlopen(f"http://{listener_host(json_listener['address'])}:{json_listener['port']}/data/aircraft.json", timeout=0.75) as response:
+                document = json.load(response)
+                if not isinstance(document, dict):
+                    raise ValueError("response is not a JSON object")
+        except Exception as error:
+            errors.append(f"JSON endpoint unavailable or invalid: {error}")
+    if subprocess.run(["nft", "list", "table", "inet", "adsb_receiver"], capture_output=True).returncode:
+        errors.append("nftables table inet adsb_receiver is not loaded")
+    return errors
+
+
+def wait_for_health(config: dict, timeout: float = 8.0, stable_for: float = 5.0, probe=health_probe, now=time.monotonic, sleeper=time.sleep) -> None:
+    deadline, healthy_since, last_errors = now() + timeout, None, []
+    while True:
+        current = now()
+        last_errors = probe(config)
+        if last_errors:
+            healthy_since = None
+        elif healthy_since is None:
+            healthy_since = current
+        elif current - healthy_since >= stable_for:
+            return
+        if current >= deadline:
+            detail = "; ".join(last_errors) if last_errors else f"health did not remain stable for {stable_for:g}s"
+            raise RuntimeError(f"health validation timed out after {timeout:g}s: {detail}")
+        sleeper(min(0.25, deadline - current))
+
+
+def snapshot(paths: list[Path]) -> dict[Path, bytes | None]:
+    return {path: path.read_bytes() if path.exists() else None for path in paths}
+
+
+def restore_files(saved: dict[Path, bytes | None], modes: dict[Path, int]) -> None:
+    for path, data in saved.items():
+        if data is None:
+            if path.exists():
+                path.unlink()
+        else:
+            atomic_write(path, data, modes.get(path, 0o600))
+
+
+def apply(config_path: Path, initial: bool = False, staged_credential: dict | None = None, health=wait_for_health) -> bool:
     config = validate(json.loads(config_path.read_text()))
-    if not initial and config["setupComplete"] and config["admin"]["enabled"] and not (ETC / "admin-password.json").exists():
-        raise ValueError("an administrator credential must be created before enabling run-mode administration")
-    rendered_config = canonical(config)
-    rendered_args = render_args(config).encode()
-    active = ETC / "config.json"
-    args_path = STATE / "readsb.args"
-    if active.exists() and active.read_bytes() == rendered_config and args_path.exists() and args_path.read_bytes() == rendered_args:
+    credential_path = ETC / "admin-password.json"
+    if config["setupComplete"] and config["admin"]["enabled"] and staged_credential is None and not credential_path.exists():
+        raise ValueError("a valid administrator credential is required before enabling run-mode administration")
+    active, args_path, firewall_path, admin_bind = ETC / "config.json", STATE / "readsb.args", STATE / "firewall.nft", RUN / "admin-bind"
+    setup_mode = (RUN / "mode").exists() and (RUN / "mode").read_text().strip() == "configuration"
+    paths = [active, args_path, firewall_path, credential_path, admin_bind]
+    modes = {active: 0o600, args_path: 0o644, firewall_path: 0o600, credential_path: 0o600, admin_bind: 0o644}
+    old = snapshot(paths)
+    desired = {active: canonical(config), args_path: render_args(config).encode(), firewall_path: firewall_rules(config, setup_mode).encode()}
+    if not setup_mode:
+        desired[admin_bind] = (config["admin"]["address"] + "\n").encode()
+    changed = any(old[path] != data for path, data in desired.items()) or staged_credential is not None
+    if not changed:
         return False
-    old_config = active.read_bytes() if active.exists() else None
-    old_args = args_path.read_bytes() if args_path.exists() else None
+    for path, data in old.items():
+        if data is not None:
+            atomic_write(STATE / f"previous-{path.name}", data, modes[path])
     try:
-        if old_config is not None:
-            atomic_write(STATE / "previous-config.json", old_config)
-        if old_args is not None:
-            atomic_write(STATE / "previous-readsb.args", old_args, 0o644)
-        atomic_write(active, rendered_config)
-        atomic_write(args_path, rendered_args, 0o644)
-        atomic_write(STATE / "firewall.nft", firewall_rules(config).encode(), 0o600)
+        for path, data in desired.items():
+            atomic_write(path, data, modes[path])
         if not initial:
             for unit in ("adsb-firewall.service", "readsb.service", "adsb-json-http.service"):
-                run_systemctl("try-restart", unit)
-            required_active = ["readsb.service"]
-            if config["listeners"]["jsonHttp"]["enabled"]:
-                required_active.append("adsb-json-http.service")
-            for unit in required_active:
-                result = run_systemctl("is-active", "--quiet", unit)
-                if result.returncode:
-                    raise RuntimeError(f"{unit} did not become active")
-        atomic_write(STATE / "last-known-good.json", rendered_config)
-        if (STATE / "last-apply-error.json").exists():
-            os.unlink(STATE / "last-apply-error.json")
+                run_systemctl("try-restart", unit, check=True)
+            health(config)
+        if staged_credential is not None:
+            atomic_write(credential_path, canonical(staged_credential))
+        atomic_write(STATE / "last-known-good.json", desired[active])
+        error_path = STATE / "last-apply-error.json"
+        if error_path.exists():
+            error_path.unlink()
         return True
     except Exception as error:
-        if old_config is not None:
-            atomic_write(active, old_config)
-        if old_args is not None:
-            atomic_write(args_path, old_args, 0o644)
-        if not initial:
-            run_systemctl("try-restart", "readsb.service")
-        record_error("apply", error)
+        rollback_state = "succeeded"
+        try:
+            restore_files(old, modes)
+            if not initial:
+                for unit in ("adsb-firewall.service", "readsb.service", "adsb-json-http.service"):
+                    run_systemctl("try-restart", unit, check=True)
+                if old[active] is not None:
+                    health(validate(json.loads(old[active])))
+        except Exception as rollback_error:
+            rollback_state = f"failed: {rollback_error}"
+            atomic_write(STATE / RECOVERY_LATCH, b"rollback-failed\n")
+        record_error("apply", error, rollback_state)
+        if rollback_state != "succeeded":
+            raise RuntimeError(f"apply failed and rollback failed: {error}; {rollback_state}") from error
         raise
 
 
@@ -291,31 +371,66 @@ def rollback() -> None:
     apply(source)
 
 
-def marker_valid(marker: Path | None = None) -> bool:
-    marker = marker or (BOOT / "recovery-request")
+def marker_valid(marker: Path, expected: bytes) -> bool:
     try:
         info = marker.lstat()
-        return stat.S_ISREG(info.st_mode) and not marker.is_symlink() and marker.read_bytes() == RECOVERY_TEXT
+        return stat.S_ISREG(info.st_mode) and not marker.is_symlink() and info.st_size == len(expected) and marker.read_bytes() == expected
     except OSError:
         return False
 
 
-def configuration_mode(config: dict, marker: Path | None = None) -> bool:
-    return not config["setupComplete"] or marker_valid(marker)
+def latch_marker(marker: Path, expected: bytes, latch: Path) -> bool:
+    if not marker_valid(marker, expected):
+        return False
+    atomic_write(latch, b"pending\n")
+    marker.unlink()
+    return True
+
+
+def latch_boot_requests() -> str | None:
+    if latch_marker(BOOT / "factory-reset", FACTORY_RESET_TEXT, STATE / FACTORY_RESET_LATCH) or (STATE / FACTORY_RESET_LATCH).exists():
+        return "factory-reset"
+    if latch_marker(BOOT / "recovery-request", RECOVERY_TEXT, STATE / RECOVERY_LATCH) or (STATE / RECOVERY_LATCH).exists():
+        return "recovery"
+    return None
+
+
+def configuration_mode(config: dict) -> bool:
+    return not config["setupComplete"] or (STATE / RECOVERY_LATCH).exists()
 
 
 def request_recovery() -> None:
-    atomic_write(BOOT / "recovery-request", RECOVERY_TEXT, 0o600)
+    atomic_write(BOOT / "recovery-request", RECOVERY_TEXT)
 
 
-def consume_recovery_marker() -> None:
-    marker = BOOT / "recovery-request"
-    if marker_valid(marker):
-        os.unlink(marker)
+def complete_configuration_mode() -> None:
+    for path in (STATE / RECOVERY_LATCH, BOOT / "setup-credentials.txt", STATE / "bootstrap-state.json"):
+        if path.exists():
+            path.unlink()
+
+
+def factory_reset() -> None:
+    latch = STATE / FACTORY_RESET_LATCH
+    if not latch.exists():
+        atomic_write(latch, b"pending\n")
+    for path in (ETC / "config.json", ETC / "admin-password.json", ETC / "admin-cert.pem", ETC / "admin-key.pem", RUN / "pending-config.json", BOOT / "setup-credentials.txt", BOOT / "recovery-request", BOOT / "factory-reset"):
+        if path.exists() or path.is_symlink():
+            path.unlink()
+    for path in tuple(STATE.iterdir()):
+        if path == latch:
+            continue
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    for profile in NM_CONNECTIONS.glob("adsb-*.nmconnection"):
+        profile.unlink()
+    apply(DEFAULT_CONFIG, initial=True)
+    latch.unlink()
 
 
 def hash_password(password: str) -> dict:
-    if len(password) < 12 or len(password) > 256:
+    if not 12 <= len(password) <= 256:
         raise ValueError("administrator password must be 12..256 characters")
     salt = secrets.token_bytes(16)
     digest = hashlib.scrypt(password.encode(), salt=salt, n=16384, r=8, p=1, dklen=32)
@@ -325,7 +440,7 @@ def hash_password(password: str) -> dict:
 def password_matches(password: str, credential: dict) -> bool:
     try:
         digest = hashlib.scrypt(password.encode(), salt=base64.b64decode(credential["salt"]), n=credential["n"], r=credential["r"], p=credential["p"], dklen=32)
-        return hmac.compare_digest(digest, base64.b64decode(credential["hash"]))
+        return credential.get("algorithm") == "scrypt" and hmac.compare_digest(digest, base64.b64decode(credential["hash"]))
     except (KeyError, ValueError, TypeError):
         return False
 
@@ -334,8 +449,7 @@ def basic_authorized(header: str | None, credential: dict, username: str = "admi
     if not header or not header.startswith("Basic "):
         return False
     try:
-        decoded = base64.b64decode(header[6:], validate=True).decode()
-        supplied_user, supplied_password = decoded.split(":", 1)
+        supplied_user, supplied_password = base64.b64decode(header[6:], validate=True).decode().split(":", 1)
     except (ValueError, UnicodeDecodeError):
         return False
     return hmac.compare_digest(supplied_user, username) and password_matches(supplied_password, credential)
@@ -344,10 +458,7 @@ def basic_authorized(header: str | None, credential: dict, username: str = "admi
 def csrf_valid(header_token: str | None, cookie_token: str | None, expected: str, origin: str | None, host: str) -> bool:
     if not header_token or not cookie_token or not origin or not origin.startswith("https://"):
         return False
-    try:
-        origin_host = origin.split("//", 1)[1].split("/", 1)[0]
-    except IndexError:
-        return False
+    origin_host = origin.split("//", 1)[1].split("/", 1)[0]
     return origin_host == host and hmac.compare_digest(header_token, expected) and hmac.compare_digest(cookie_token, expected)
 
 
@@ -357,12 +468,21 @@ def escape_keyfile(value: str, label: str) -> str:
     return value.replace("\\", "\\\\").replace(";", "\\;")
 
 
-def wifi_keyfile(ssid: str, password: str, interface: str, connection_id: str = "adsb-wifi") -> bytes:
-    if not 1 <= len(ssid.encode()) <= 32:
-        raise ValueError("Wi-Fi SSID must be 1..32 bytes")
-    if not 8 <= len(password) <= 63:
-        raise ValueError("Wi-Fi password must be 8..63 characters")
+def ipv4_keyfile(profile: dict, metric: int) -> str:
+    if profile["method"] == "dhcp":
+        return f"method=auto\nroute-metric={metric}\n"
+    address = f"address1={profile['address']}/{profile['prefixLength']}"
+    if profile["gateway"]:
+        address += f",{profile['gateway']}"
+    dns = f"dns={';'.join(profile['dns'])};\n" if profile["dns"] else ""
+    return f"method=manual\n{address}\n{dns}route-metric={metric}\n"
+
+
+def wifi_keyfile(ssid: str, password: str, interface: str, profile: dict, connection_id: str = "adsb-wifi") -> bytes:
+    if not 1 <= len(ssid.encode()) <= 32 or not 8 <= len(password) <= 63:
+        raise ValueError("Wi-Fi SSID must be 1..32 bytes and password 8..63 characters")
     interface_name(interface, "Wi-Fi interface")
+    validate_ipv4_profile(profile, "network.wifi.ipv4")
     return f"""[connection]
 id={connection_id}
 uuid={uuid.uuid4()}
@@ -380,100 +500,273 @@ key-mgmt=wpa-psk
 psk={escape_keyfile(password, 'Wi-Fi password')}
 
 [ipv4]
-method=auto
-route-metric=600
-
+{ipv4_keyfile(profile, 600)}
 [ipv6]
 method=auto
 route-metric=600
 """.encode()
 
 
-def configure_wifi(ssid: str, password: str, interface: str) -> None:
-    candidate = RUN / "adsb-wifi-candidate.nmconnection"
-    atomic_write(candidate, wifi_keyfile(ssid, password, interface, "adsb-wifi-candidate"), 0o600)
+def replace_ipv4_section(keyfile: bytes, profile: dict, metric: int) -> bytes:
+    text = keyfile.decode()
+    replacement = "[ipv4]\n" + ipv4_keyfile(profile, metric)
+    updated, count = re.subn(r"(?ms)^\[ipv4\]\n.*?(?=^\[|\Z)", replacement, text)
+    if count != 1:
+        raise ValueError("managed NetworkManager profile has no unique IPv4 section")
+    return updated.encode()
+
+
+def ethernet_keyfile(interface: str, profile: dict) -> bytes:
+    interface_name(interface, "Ethernet interface")
+    validate_ipv4_profile(profile, "network.ethernet.ipv4")
+    return f"""[connection]
+id=adsb-ethernet
+uuid={uuid.uuid4()}
+type=ethernet
+interface-name={interface}
+autoconnect=true
+autoconnect-priority=20
+
+[ethernet]
+
+[ipv4]
+{ipv4_keyfile(profile, 100)}
+[ipv6]
+method=auto
+route-metric=100
+""".encode()
+
+
+def nmcli(*arguments: str, check: bool = False, timeout: int = 45) -> subprocess.CompletedProcess:
+    return subprocess.run(["nmcli", *arguments], check=check, capture_output=True, text=True, timeout=timeout)
+
+
+def interface_has_ipv4(interface: str, expected: str | None = None) -> bool:
+    result = subprocess.run(["ip", "-json", "address", "show", "dev", interface], capture_output=True, text=True)
+    if result.returncode:
+        return False
     try:
-        subprocess.run(["nmcli", "connection", "load", str(candidate)], check=True, capture_output=True, text=True)
-        subprocess.run(["nmcli", "connection", "up", "adsb-wifi-candidate"], check=True, capture_output=True, text=True, timeout=45)
-        final = NM_CONNECTIONS / "adsb-wifi.nmconnection"
-        atomic_write(final, wifi_keyfile(ssid, password, interface), 0o600)
-        subprocess.run(["nmcli", "connection", "load", str(final)], check=True, capture_output=True, text=True)
-        subprocess.run(["nmcli", "connection", "up", "adsb-wifi"], check=True, capture_output=True, text=True, timeout=45)
-        subprocess.run(["nmcli", "connection", "delete", "adsb-wifi-candidate"], check=False, capture_output=True, text=True)
+        addresses = [item["local"] for item in json.loads(result.stdout)[0].get("addr_info", []) if item.get("family") == "inet" and item.get("scope") == "global"]
+        return expected in addresses if expected else bool(addresses)
+    except (KeyError, IndexError, json.JSONDecodeError):
+        return False
+
+
+def configure_wifi(ssid: str, password: str, interface: str, profile: dict) -> dict:
+    candidate, final = RUN / "adsb-wifi-candidate.nmconnection", NM_CONNECTIONS / "adsb-wifi.nmconnection"
+    saved = snapshot([final])
+    previous = nmcli("-g", "GENERAL.CONNECTION", "device", "show", interface).stdout.strip()
+    atomic_write(candidate, wifi_keyfile(ssid, password, interface, profile, "adsb-wifi-candidate"))
+    try:
+        nmcli("connection", "load", str(candidate), check=True)
+        nmcli("connection", "up", "adsb-wifi-candidate", check=True)
+        if not interface_has_ipv4(interface, profile["address"] if profile["method"] == "static" else None):
+            raise RuntimeError("candidate Wi-Fi profile did not acquire the expected IPv4 address")
+        atomic_write(final, wifi_keyfile(ssid, password, interface, profile))
+        nmcli("connection", "load", str(final), check=True)
+        nmcli("connection", "up", "adsb-wifi", check=True)
+        if not interface_has_ipv4(interface, profile["address"] if profile["method"] == "static" else None):
+            raise RuntimeError("final Wi-Fi profile did not acquire the expected IPv4 address")
+        return {"saved": saved, "interface": interface, "previous": previous, "connection": "adsb-wifi"}
+    except Exception:
+        restore_network({"saved": saved, "interface": interface, "previous": previous, "connection": "adsb-wifi"})
+        raise
     finally:
+        nmcli("connection", "delete", "adsb-wifi-candidate")
         if candidate.exists():
-            os.unlink(candidate)
+            candidate.unlink()
+
+
+def configure_ethernet(interface: str, profile: dict, enabled: bool) -> dict:
+    final = NM_CONNECTIONS / "adsb-ethernet.nmconnection"
+    transaction = {"saved": snapshot([final]), "interface": interface, "previous": nmcli("-g", "GENERAL.CONNECTION", "device", "show", interface).stdout.strip(), "connection": "adsb-ethernet"}
+    try:
+        if enabled:
+            atomic_write(final, ethernet_keyfile(interface, profile))
+            nmcli("connection", "load", str(final), check=True)
+            nmcli("connection", "up", "adsb-ethernet", check=True)
+            if not interface_has_ipv4(interface, profile["address"] if profile["method"] == "static" else None):
+                raise RuntimeError("Ethernet profile did not acquire the expected IPv4 address")
+        else:
+            nmcli("connection", "down", "adsb-ethernet")
+            if final.exists():
+                final.unlink()
+        return transaction
+    except Exception:
+        restore_network(transaction)
+        raise
+
+
+def configure_existing_wifi(interface: str, profile: dict) -> dict | None:
+    final = NM_CONNECTIONS / "adsb-wifi.nmconnection"
+    if not final.exists():
+        return None
+    transaction = {"saved": snapshot([final]), "interface": interface, "previous": nmcli("-g", "GENERAL.CONNECTION", "device", "show", interface).stdout.strip(), "connection": "adsb-wifi"}
+    try:
+        atomic_write(final, replace_ipv4_section(final.read_bytes(), profile, 600))
+        nmcli("connection", "load", str(final), check=True)
+        nmcli("connection", "up", "adsb-wifi", check=True)
+        expected = profile["address"] if profile["method"] == "static" else None
+        if not interface_has_ipv4(interface, expected):
+            raise RuntimeError("Wi-Fi profile did not acquire the expected IPv4 address")
+        return transaction
+    except Exception:
+        restore_network(transaction)
+        raise
+
+
+def disable_managed_wifi(interface: str) -> dict | None:
+    final = NM_CONNECTIONS / "adsb-wifi.nmconnection"
+    if not final.exists():
+        return None
+    transaction = {"saved": snapshot([final]), "interface": interface, "previous": nmcli("-g", "GENERAL.CONNECTION", "device", "show", interface).stdout.strip(), "connection": "adsb-wifi"}
+    nmcli("connection", "down", "adsb-wifi")
+    nmcli("connection", "delete", "adsb-wifi")
+    final.unlink()
+    return transaction
+
+
+def configure_network(config: dict, wifi: dict | None, configuration_mode_active: bool) -> list[dict]:
+    transactions = []
+    try:
+        wireless = config["network"]["wifi"]
+        if wifi is not None:
+            transactions.append(configure_wifi(wifi["ssid"], wifi["password"], wireless["interface"], wireless["ipv4"]))
+        elif wireless["configured"]:
+            transaction = configure_existing_wifi(wireless["interface"], wireless["ipv4"])
+            if transaction is not None:
+                transactions.append(transaction)
+            elif configuration_mode_active:
+                raise ValueError("Wi-Fi cannot be marked configured without supplying credentials")
+        else:
+            transaction = disable_managed_wifi(wireless["interface"])
+            if transaction is not None:
+                transactions.append(transaction)
+        ethernet = config["network"]["ethernet"]
+        transactions.append(configure_ethernet(ethernet["interface"], ethernet["ipv4"], ethernet["enabled"]))
+        return transactions
+    except Exception:
+        for transaction in reversed(transactions):
+            restore_network(transaction)
+        raise
+
+
+def restore_network(transaction: dict) -> None:
+    nmcli("connection", "down", transaction["connection"])
+    nmcli("connection", "delete", transaction["connection"])
+    restore_files(transaction["saved"], {})
+    nmcli("connection", "reload")
+    previous = transaction.get("previous")
+    if previous and previous != "--":
+        nmcli("connection", "up", previous)
+
+
+def release_metadata() -> dict:
+    values = {}
+    try:
+        for line in Path("/etc/adsb-receiver-release").read_text().splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                values[key] = value or "unavailable"
+    except OSError:
+        pass
+    return {key: values.get(key, "unavailable") for key in ("IMAGE_VERSION", "TARGET", "REPOSITORY_COMMIT", "ARMBIAN_REVISION", "DEBIAN_RELEASE", "READSB_REVISION")}
+
+
+def command(arguments: list[str]) -> str:
+    try:
+        result = subprocess.run(arguments, capture_output=True, text=True, timeout=8)
+        value = result.stdout.strip() or result.stderr.strip()
+        return value if result.returncode == 0 and value else "unavailable"
+    except (OSError, subprocess.TimeoutExpired):
+        return "unavailable"
 
 
 def status_document() -> dict:
     config = validate(json.loads((ETC / "config.json").read_text()))
-    def command(arguments: list[str]) -> str:
-        result = subprocess.run(arguments, capture_output=True, text=True, timeout=5)
-        return result.stdout.strip() if result.returncode == 0 else "unavailable"
-    error = None
-    if (STATE / "last-apply-error.json").exists():
-        error = json.loads((STATE / "last-apply-error.json").read_text())
+    error = json.loads((STATE / "last-apply-error.json").read_text()) if (STATE / "last-apply-error.json").exists() else None
     try:
-        current_mode = (RUN / "mode").read_text().strip()
+        mode = (RUN / "mode").read_text().strip()
     except OSError:
-        current_mode = "configuration" if configuration_mode(config) else "run"
-    if current_mode not in {"configuration", "run"}:
-        current_mode = "configuration" if configuration_mode(config) else "run"
-    return {
-        "mode": current_mode,
-        "services": {name: command(["systemctl", "is-active", name]) for name in ("readsb.service", "adsb-json-http.service", "adsb-admin.service")},
-        "sdr": command(["lsusb", "-d", "0bda:2838"]),
-        "network": command(["nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status"]),
-        "endpoints": {
-            "beast": config["listeners"]["beast"],
-            "jsonHttp": config["listeners"]["jsonHttp"],
-            "admin": config["admin"],
-        },
-        "lastApplyError": redact(error),
-    }
+        mode = "configuration" if configuration_mode(config) else "run"
+    if mode not in {"configuration", "run"}:
+        mode = "configuration" if configuration_mode(config) else "run"
+    try:
+        uptime = f"{float(Path('/proc/uptime').read_text().split()[0]):.0f}s"
+    except (OSError, ValueError, IndexError):
+        uptime = "unavailable"
+    return {"mode": mode, "recoveryLatched": (STATE / RECOVERY_LATCH).exists(), "factoryResetPending": (STATE / FACTORY_RESET_LATCH).exists(), "release": release_metadata(), "runtime": {"kernel": command(["uname", "-r"]), "readsb": command(["readsb", "--version"]), "uptime": uptime}, "services": {name: command(["systemctl", "is-active", name]) for name in ("readsb.service", "adsb-json-http.service", "adsb-admin.service")}, "sdr": command(["lsusb", "-d", "0bda:2838"]), "network": command(["nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status"]), "endpoints": {"beast": config["listeners"]["beast"], "jsonHttp": config["listeners"]["jsonHttp"], "admin": config["admin"]}, "lastApplyError": redact(error)}
+
+
+def diagnostics(output: Path | None = None) -> Path:
+    output = output or Path("/var/tmp") / f"adsb-receiver-diagnostics-{int(time.time())}.tar.gz"
+    with tempfile.TemporaryDirectory(prefix="adsb-diagnostics-") as directory:
+        root = Path(directory)
+        atomic_write(root / "status.json", canonical(status_document()), 0o644)
+        atomic_write(root / "config-redacted.json", canonical(redact(json.loads((ETC / "config.json").read_text()))), 0o644)
+        commands = {
+            "journal.txt": ["journalctl", "--no-pager", "-n", "400", "-u", "adsb-*.service"],
+            "networkmanager.txt": ["nmcli", "-f", "GENERAL,IP4", "device", "show"],
+            "addresses.txt": ["ip", "address", "show"], "routes.txt": ["ip", "route", "show"],
+            "sockets.txt": ["ss", "-lntup"], "usb.txt": ["lsusb"], "disk.txt": ["df", "-hT"],
+            "firewall.txt": ["nft", "list", "table", "inet", "adsb_receiver"],
+        }
+        for name, arguments in commands.items():
+            atomic_write(root / name, (command(arguments) + "\n").encode(), 0o644)
+        profiles = []
+        for path in sorted(NM_CONNECTIONS.glob("adsb-*.nmconnection")):
+            safe = [line for line in path.read_text(errors="replace").splitlines() if not re.match(r"(?i)^(psk|password|private-key|secret)=", line)]
+            profiles.append({"name": path.name, "metadata": safe})
+        atomic_write(root / "networkmanager-profiles-redacted.json", canonical(profiles), 0o644)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(output, "w:gz") as archive:
+            archive.add(root, arcname="adsb-receiver-diagnostics")
+    os.chmod(output, 0o600)
+    return output
 
 
 def initialize() -> None:
-    ETC.mkdir(parents=True, exist_ok=True)
-    STATE.mkdir(parents=True, exist_ok=True)
-    RUN.mkdir(parents=True, exist_ok=True)
+    for directory in (ETC, STATE, RUN, BOOT, NM_CONNECTIONS):
+        directory.mkdir(parents=True, exist_ok=True)
+    request = latch_boot_requests()
+    if request == "factory-reset" or (STATE / FACTORY_RESET_LATCH).exists():
+        factory_reset()
     if not (ETC / "config.json").exists():
         apply(DEFAULT_CONFIG, initial=True)
 
 
+def firewall() -> None:
+    config = validate(json.loads((ETC / "config.json").read_text()))
+    setup = (RUN / "mode").exists() and (RUN / "mode").read_text().strip() == "configuration"
+    exists = subprocess.run(["nft", "list", "table", "inet", "adsb_receiver"], capture_output=True).returncode == 0
+    batch = ("delete table inet adsb_receiver\n" if exists else "") + firewall_rules(config, setup)
+    subprocess.run(["nft", "-f", "-"], input=batch, text=True, check=True)
+
+
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(name)s: %(levelname)s: %(message)s")
     parser = argparse.ArgumentParser()
-    subcommands = parser.add_subparsers(dest="command", required=True)
-    for command in ("validate", "apply"):
-        item = subcommands.add_parser(command)
-        item.add_argument("file", type=Path)
-    subcommands.add_parser("initialize")
-    subcommands.add_parser("status")
-    subcommands.add_parser("rollback")
-    subcommands.add_parser("request-recovery")
-    subcommands.add_parser("firewall")
+    commands = parser.add_subparsers(dest="command", required=True)
+    for name in ("validate", "apply"):
+        sub = commands.add_parser(name)
+        sub.add_argument("file", type=Path)
+    for name in ("initialize", "status", "rollback", "request-recovery", "firewall", "factory-reset"):
+        commands.add_parser(name)
+    diagnostic = commands.add_parser("diagnostics")
+    diagnostic.add_argument("output", nargs="?", type=Path)
     args = parser.parse_args()
-    if args.command == "validate":
-        validate(json.loads(args.file.read_text()))
-    elif args.command == "apply":
-        apply(args.file)
-    elif args.command == "initialize":
-        initialize()
-    elif args.command == "status":
-        print(json.dumps(status_document(), indent=2))
-    elif args.command == "rollback":
-        rollback()
-    elif args.command == "request-recovery":
-        request_recovery()
-    elif args.command == "firewall":
-        config = validate(json.loads((ETC / "config.json").read_text()))
-        exists = subprocess.run(["nft", "list", "table", "inet", "adsb_receiver"], check=False, capture_output=True).returncode == 0
-        batch = ("delete table inet adsb_receiver\n" if exists else "") + firewall_rules(config)
-        subprocess.run(["nft", "-f", "-"], input=batch, text=True, check=True)
+    if args.command == "validate": validate(json.loads(args.file.read_text()))
+    elif args.command == "apply": apply(args.file)
+    elif args.command == "initialize": initialize()
+    elif args.command == "status": print(json.dumps(status_document(), indent=2))
+    elif args.command == "rollback": rollback()
+    elif args.command == "request-recovery": request_recovery()
+    elif args.command == "firewall": firewall()
+    elif args.command == "factory-reset": factory_reset()
+    elif args.command == "diagnostics": print(diagnostics(args.output))
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     try:
         main()
     except Exception as error:

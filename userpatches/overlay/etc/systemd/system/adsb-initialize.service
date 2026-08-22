@@ -1,5 +1,6 @@
 [Unit]
 Description=Initialize local ADS-B receiver configuration
+RequiresMountsFor=/boot/adsb-bootstrap
 Before=readsb.service adsb-firewall.service adsb-network-mode.service adsb-json-http.service adsb-admin.service
 
 [Service]
@@ -11,7 +12,9 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
-ReadWritePaths=/etc/adsb-receiver /var/lib/adsb-receiver /run/adsb-receiver
+ReadWritePaths=/etc/adsb-receiver /etc/NetworkManager/system-connections /var/lib/adsb-receiver /run/adsb-receiver /boot/adsb-bootstrap
+UMask=0077
+CapabilityBoundingSet=
 
 [Install]
 WantedBy=multi-user.target

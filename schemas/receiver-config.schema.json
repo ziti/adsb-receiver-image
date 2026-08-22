@@ -5,129 +5,19 @@
   "type": "object",
   "required": ["schemaVersion", "setupComplete", "receiver", "network", "listeners", "admin", "configurationMode", "advanced"],
   "properties": {
-    "schemaVersion": {"const": 2},
+    "schemaVersion": {"const": 3},
     "setupComplete": {"type": "boolean"},
-    "receiver": {
-      "type": "object",
-      "required": ["name", "latitude", "longitude", "altitudeMeters", "gain", "device"],
-      "properties": {
-        "name": {"type": "string", "minLength": 1, "maxLength": 63, "pattern": "^[A-Za-z0-9][A-Za-z0-9._ -]*$"},
-        "latitude": {"type": ["number", "null"], "minimum": -90, "maximum": 90},
-        "longitude": {"type": ["number", "null"], "minimum": -180, "maximum": 180},
-        "altitudeMeters": {"type": ["number", "null"], "minimum": -1000, "maximum": 20000},
-        "gain": {"oneOf": [{"const": "auto"}, {"type": "number", "minimum": 0, "maximum": 58}]},
-        "device": {"oneOf": [{"const": "auto"}, {"type": "integer", "minimum": 0, "maximum": 31}]}
-      },
-      "additionalProperties": false
-    },
-    "network": {
-      "type": "object",
-      "required": ["ethernet", "wifi"],
-      "properties": {
-        "ethernet": {
-          "type": "object",
-          "required": ["enabled", "interface"],
-          "properties": {
-            "enabled": {"type": "boolean"},
-            "interface": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,15}$"}
-          },
-          "additionalProperties": false
-        },
-        "wifi": {
-          "type": "object",
-          "required": ["configured", "interface"],
-          "properties": {
-            "configured": {"type": "boolean"},
-            "interface": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,15}$"}
-          },
-          "additionalProperties": false
-        }
-      },
-      "additionalProperties": false
-    },
-    "listeners": {
-      "type": "object",
-      "required": ["beast", "jsonHttp"],
-      "properties": {
-        "beast": {"$ref": "#/$defs/listener"},
-        "jsonHttp": {"$ref": "#/$defs/listener"}
-      },
-      "additionalProperties": false
-    },
-    "outboundConnectors": {
-      "type": "array",
-      "maxItems": 16,
-      "items": {
-        "type": "object",
-        "required": ["enabled", "host", "port", "protocol"],
-        "properties": {
-          "enabled": {"type": "boolean"},
-          "host": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$"},
-          "port": {"type": "integer", "minimum": 1, "maximum": 65535},
-          "protocol": {"enum": ["beast_out", "beast_reduce_plus_out"]}
-        },
-        "additionalProperties": false
-      },
-      "default": []
-    },
-    "admin": {
-      "type": "object",
-      "required": ["enabled", "address", "port", "tls"],
-      "properties": {
-        "enabled": {"type": "boolean"},
-        "address": {"type": "string", "format": "ipv4"},
-        "port": {"type": "integer", "minimum": 1024, "maximum": 65535},
-        "tls": {"const": true}
-      },
-      "additionalProperties": false
-    },
-    "configurationMode": {
-      "type": "object",
-      "required": ["apGateway", "apPrefixLength", "recoveryMarker"],
-      "properties": {
-        "apGateway": {"const": "192.168.77.1"},
-        "apPrefixLength": {"const": 24},
-        "recoveryMarker": {"const": "/boot/adsb-receiver/recovery-request"}
-      },
-      "additionalProperties": false
-    },
-    "advanced": {
-      "type": "object",
-      "required": ["ppm", "maxRangeNmi"],
-      "properties": {
-        "ppm": {"type": "integer", "minimum": -200, "maximum": 200},
-        "maxRangeNmi": {"type": "integer", "minimum": 1, "maximum": 500}
-      },
-      "additionalProperties": false
-    }
+    "receiver": {"type": "object", "required": ["name", "latitude", "longitude", "altitudeMeters", "gain", "device"], "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 63, "pattern": "^[A-Za-z0-9][A-Za-z0-9._ -]*$"}, "latitude": {"type": ["number", "null"], "minimum": -90, "maximum": 90}, "longitude": {"type": ["number", "null"], "minimum": -180, "maximum": 180}, "altitudeMeters": {"type": ["number", "null"], "minimum": -1000, "maximum": 20000}, "gain": {"oneOf": [{"const": "auto"}, {"type": "number", "minimum": 0, "maximum": 58}]}, "device": {"oneOf": [{"const": "auto"}, {"type": "integer", "minimum": 0, "maximum": 31}]}}, "additionalProperties": false},
+    "network": {"type": "object", "required": ["ethernet", "wifi"], "properties": {"ethernet": {"type": "object", "required": ["enabled", "interface", "ipv4"], "properties": {"enabled": {"type": "boolean"}, "interface": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,15}$"}, "ipv4": {"$ref": "#/$defs/ipv4Profile"}}, "additionalProperties": false}, "wifi": {"type": "object", "required": ["configured", "interface", "ipv4"], "properties": {"configured": {"type": "boolean"}, "interface": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,15}$"}, "ipv4": {"$ref": "#/$defs/ipv4Profile"}}, "additionalProperties": false}}, "additionalProperties": false},
+    "listeners": {"type": "object", "required": ["beast", "jsonHttp"], "properties": {"beast": {"$ref": "#/$defs/listener"}, "jsonHttp": {"$ref": "#/$defs/listener"}}, "additionalProperties": false},
+    "admin": {"type": "object", "required": ["enabled", "address", "port", "tls"], "properties": {"enabled": {"type": "boolean"}, "address": {"type": "string", "format": "ipv4"}, "port": {"type": "integer", "minimum": 1024, "maximum": 65535}, "tls": {"const": true}}, "additionalProperties": false},
+    "configurationMode": {"type": "object", "required": ["apGateway", "apPrefixLength", "recoveryMarker", "factoryResetMarker"], "properties": {"apGateway": {"const": "192.168.77.1"}, "apPrefixLength": {"const": 24}, "recoveryMarker": {"const": "/boot/adsb-bootstrap/recovery-request"}, "factoryResetMarker": {"const": "/boot/adsb-bootstrap/factory-reset"}}, "additionalProperties": false},
+    "advanced": {"type": "object", "required": ["ppm", "maxRangeNmi"], "properties": {"ppm": {"type": "integer", "minimum": -200, "maximum": 200}, "maxRangeNmi": {"type": "integer", "minimum": 1, "maximum": 500}}, "additionalProperties": false}
   },
   "$defs": {
-    "listener": {
-      "type": "object",
-      "required": ["enabled", "address", "port"],
-      "properties": {
-        "enabled": {"type": "boolean"},
-        "address": {"type": "string", "format": "ipv4"},
-        "port": {"type": "integer", "minimum": 1024, "maximum": 65535}
-      },
-      "additionalProperties": false
-    }
+    "ipv4Profile": {"type": "object", "required": ["method", "address", "prefixLength", "gateway", "dns"], "properties": {"method": {"enum": ["dhcp", "static"]}, "address": {"type": ["string", "null"], "format": "ipv4"}, "prefixLength": {"type": ["integer", "null"], "minimum": 1, "maximum": 32}, "gateway": {"type": ["string", "null"], "format": "ipv4"}, "dns": {"type": "array", "maxItems": 4, "uniqueItems": true, "items": {"type": "string", "format": "ipv4"}}}, "allOf": [{"if": {"properties": {"method": {"const": "dhcp"}}}, "then": {"properties": {"address": {"const": null}, "prefixLength": {"const": null}, "gateway": {"const": null}, "dns": {"maxItems": 0}}}, "else": {"properties": {"address": {"type": "string"}, "prefixLength": {"type": "integer"}}}}], "additionalProperties": false},
+    "listener": {"type": "object", "required": ["enabled", "address", "port"], "properties": {"enabled": {"type": "boolean"}, "address": {"type": "string", "format": "ipv4"}, "port": {"type": "integer", "minimum": 1024, "maximum": 65535}}, "additionalProperties": false}
   },
-  "allOf": [
-    {
-      "if": {"properties": {"setupComplete": {"const": true}}},
-      "then": {
-        "properties": {
-          "receiver": {
-            "properties": {
-              "latitude": {"type": "number"},
-              "longitude": {"type": "number"},
-              "altitudeMeters": {"type": "number"}
-            }
-          }
-        }
-      }
-    }
-  ],
+  "allOf": [{"if": {"properties": {"setupComplete": {"const": true}}}, "then": {"properties": {"receiver": {"properties": {"latitude": {"type": "number"}, "longitude": {"type": "number"}, "altitudeMeters": {"type": "number"}}}}}}],
   "additionalProperties": false
 }

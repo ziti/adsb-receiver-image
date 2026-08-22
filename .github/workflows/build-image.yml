@@ -6,7 +6,7 @@ on:
       image_version:
         description: Release and image version, for example 2026.08.20.1
         required: true
-        default: 2026.08.22.1
+        default: 2026.08.22.2
         type: string
 
 permissions:
@@ -73,8 +73,11 @@ jobs:
           armbian_target: build
           armbian_ui: minimal
           armbian_compress: sha,img,xz
-          armbian_extensions: adsb-kernel-pin
+          armbian_extensions: adsb-kernel-pin,adsb-bootstrap-partition
           armbian_release_tag: ${{ inputs.image_version }}
+          # Each matrix cell uploads to one shared prerelease. Promotion occurs
+          # only after every image passes partition inspection and metadata.
+          armbian_release_prerelease: true
           armbian_release_title: ADS-B receiver image ${{ inputs.image_version }}
           armbian_release_body: |
             Reproducible minimal Armbian-based ADS-B receiver image.
@@ -104,6 +107,7 @@ jobs:
           armbian_os_checkout=$(git -C os rev-parse HEAD)
           test "$armbian_framework_checkout" = "$ARMBIAN_ACTION_REVISION"
           sha256sum build/output/images/*.img.xz > "$metadata_dir/image-sha256sums.txt"
+          sudo scripts/inspect-built-image.sh build/output/images/*.img.xz | tee "$metadata_dir/image-layout.txt" >/dev/null
           ARMBIAN_FRAMEWORK_CHECKOUT="$armbian_framework_checkout" \
           ARMBIAN_OS_CHECKOUT="$armbian_os_checkout" \
           GIT_SOURCES_METADATA="$git_sources_metadata" python - "$metadata_dir/build-manifest.json" <<'PY'
@@ -143,3 +147,14 @@ jobs:
             build/output/images/*.img.xz
             build/output/images/*.sha
             build/output/adsb-metadata/${{ matrix.target }}/
+
+  finalize-release:
+    name: Promote inspected release
+    needs: build
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      IMAGE_VERSION: ${{ inputs.image_version }}
+    steps:
+      - name: Promote shared prerelease after every target passes
+        run: gh release edit "$IMAGE_VERSION" --prerelease=false --latest

@@ -21,17 +21,18 @@ CSRF_TOKEN = secrets.token_urlsafe(32)
 HTML = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ADS-B receiver administration</title>
-<style>body{font:16px system-ui;max-width:900px;margin:2rem auto;padding:0 1rem;background:#111827;color:#e5e7eb}textarea,input{box-sizing:border-box;width:100%;padding:.6rem;margin:.25rem 0 1rem;background:#1f2937;color:#fff;border:1px solid #4b5563}input[type=checkbox]{width:auto}textarea{height:28rem;font:13px ui-monospace}button{padding:.7rem 1rem;background:#2563eb;color:#fff;border:0;border-radius:.3rem}pre,fieldset{background:#1f2937;padding:1rem;margin:1rem 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:0 1rem}.secret{display:none}</style></head>
+<style>body{font:16px system-ui;max-width:900px;margin:2rem auto;padding:0 1rem;background:#111827;color:#e5e7eb}textarea,input,select{box-sizing:border-box;width:100%;padding:.6rem;margin:.25rem 0 1rem;background:#1f2937;color:#fff;border:1px solid #4b5563}input[type=checkbox]{width:auto}textarea{height:28rem;font:13px ui-monospace}button{padding:.7rem 1rem;background:#2563eb;color:#fff;border:0;border-radius:.3rem}pre,fieldset{background:#1f2937;padding:1rem;margin:1rem 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:0 1rem}.secret{display:none}</style></head>
 <body><h1>ADS-B receiver</h1><p id="mode"></p><h2>Status</h2><pre id="status">Loading...</pre>
 <h2>Configuration</h2><p>Supported settings are validated before an atomic apply. Unknown fields are rejected.</p>
 <fieldset><legend>Receiver</legend><div class="grid"><label>Name<input id="receiverName" required></label><label>Latitude<input id="latitude" type="number" step="any" required></label><label>Longitude<input id="longitude" type="number" step="any" required></label><label>Altitude, meters<input id="altitude" type="number" step="any" required></label><label>SDR gain (`auto` or dB)<input id="gain" required></label></div></fieldset>
+<fieldset><legend>Networking</legend><p>Choose DHCP or enter all required static IPv4 fields. DNS is a comma-separated list.</p><div class="grid"><label><input id="ethernetEnabled" type="checkbox"> Ethernet enabled</label><label>Ethernet interface<input id="ethernetInterface"></label><label>Ethernet IPv4<select id="ethernetMethod"><option value="dhcp">DHCP</option><option value="static">Static</option></select></label><label>Ethernet address<input id="ethernetAddress"></label><label>Ethernet prefix<input id="ethernetPrefix" type="number"></label><label>Ethernet gateway<input id="ethernetGateway"></label><label>Ethernet DNS<input id="ethernetDns"></label><label><input id="wifiConfigured" type="checkbox"> Wi-Fi configured</label><label>Wi-Fi interface<input id="wifiInterface"></label><label>Wi-Fi IPv4<select id="wifiMethod"><option value="dhcp">DHCP</option><option value="static">Static</option></select></label><label>Wi-Fi address<input id="wifiAddress"></label><label>Wi-Fi prefix<input id="wifiPrefix" type="number"></label><label>Wi-Fi gateway<input id="wifiGateway"></label><label>Wi-Fi DNS<input id="wifiDns"></label></div></fieldset>
 <fieldset><legend>LAN data listeners</legend><div class="grid"><label><input id="beastEnabled" type="checkbox"> Beast enabled</label><label>Beast address<input id="beastAddress"></label><label>Beast port<input id="beastPort" type="number"></label><label><input id="jsonEnabled" type="checkbox"> JSON HTTP enabled</label><label>JSON address<input id="jsonAddress"></label><label>JSON port<input id="jsonPort" type="number"></label></div></fieldset>
 <fieldset><legend>Run-mode administration</legend><div class="grid"><label><input id="adminEnabled" type="checkbox"> Admin enabled</label><label>Management address<input id="adminAddress"></label><label>Admin HTTPS port<input id="adminPort" type="number"></label></div></fieldset>
 <div id="setup" class="secret"><h2>First-boot credentials</h2><label>Wi-Fi SSID<input id="ssid" autocomplete="off"></label><label>Wi-Fi password<input id="wifiPassword" type="password" autocomplete="new-password"></label></div>
 <label>New administrator password <small>(required during first setup, optional later)</small><input id="adminPassword" type="password" autocomplete="new-password"></label>
-<details><summary>Complete validated JSON</summary><p>Device selection, interface names, outbound connectors, PPM, and maximum range are available here.</p><textarea id="config"></textarea></details>
+<details><summary>Complete validated JSON</summary><p>Device selection, interface addressing, PPM, and maximum range are available here.</p><textarea id="config"></textarea></details>
 <button id="apply">Validate and apply</button><pre id="result"></pre>
-<script>const csrf='__CSRF__',$=id=>document.getElementById(id),num=id=>$(id).value===''?null:Number($(id).value);async function get(p){let r=await fetch(p);if(!r.ok)throw Error(await r.text());return r.json()}function show(c){$('config').value=JSON.stringify(c,null,2);$('receiverName').value=c.receiver.name;$('latitude').value=c.receiver.latitude??'';$('longitude').value=c.receiver.longitude??'';$('altitude').value=c.receiver.altitudeMeters??'';$('gain').value=c.receiver.gain;$('beastEnabled').checked=c.listeners.beast.enabled;$('beastAddress').value=c.listeners.beast.address;$('beastPort').value=c.listeners.beast.port;$('jsonEnabled').checked=c.listeners.jsonHttp.enabled;$('jsonAddress').value=c.listeners.jsonHttp.address;$('jsonPort').value=c.listeners.jsonHttp.port;$('adminEnabled').checked=c.admin.enabled;$('adminAddress').value=c.admin.address;$('adminPort').value=c.admin.port}function collect(){let c=JSON.parse($('config').value);c.receiver.name=$('receiverName').value;c.receiver.latitude=num('latitude');c.receiver.longitude=num('longitude');c.receiver.altitudeMeters=num('altitude');c.receiver.gain=$('gain').value==='auto'?'auto':num('gain');c.listeners.beast={enabled:$('beastEnabled').checked,address:$('beastAddress').value,port:num('beastPort')};c.listeners.jsonHttp={enabled:$('jsonEnabled').checked,address:$('jsonAddress').value,port:num('jsonPort')};c.admin.enabled=$('adminEnabled').checked;c.admin.address=$('adminAddress').value;c.admin.port=num('adminPort');return c}async function load(){let [s,c]=await Promise.all([get('/api/status'),get('/api/config')]);$('status').textContent=JSON.stringify(s,null,2);show(c);$('mode').textContent='Mode: '+s.mode;if(s.mode==='configuration')$('setup').className=''}
+<script>const csrf='__CSRF__',$=id=>document.getElementById(id),num=id=>$(id).value===''?null:Number($(id).value),dns=id=>$(id).value.split(',').map(x=>x.trim()).filter(Boolean);async function get(p){let r=await fetch(p);if(!r.ok)throw Error(await r.text());return r.json()}function showNet(name,n){$(name+'Interface').value=n.interface;$(name+'Method').value=n.ipv4.method;$(name+'Address').value=n.ipv4.address??'';$(name+'Prefix').value=n.ipv4.prefixLength??'';$(name+'Gateway').value=n.ipv4.gateway??'';$(name+'Dns').value=n.ipv4.dns.join(', ')}function collectNet(name,n){n.interface=$(name+'Interface').value;let method=$(name+'Method').value;n.ipv4=method==='dhcp'?{method,address:null,prefixLength:null,gateway:null,dns:[]}:{method,address:$(name+'Address').value,prefixLength:num(name+'Prefix'),gateway:$(name+'Gateway').value||null,dns:dns(name+'Dns')}}function show(c){$('config').value=JSON.stringify(c,null,2);$('receiverName').value=c.receiver.name;$('latitude').value=c.receiver.latitude??'';$('longitude').value=c.receiver.longitude??'';$('altitude').value=c.receiver.altitudeMeters??'';$('gain').value=c.receiver.gain;$('ethernetEnabled').checked=c.network.ethernet.enabled;$('wifiConfigured').checked=c.network.wifi.configured;showNet('ethernet',c.network.ethernet);showNet('wifi',c.network.wifi);$('beastEnabled').checked=c.listeners.beast.enabled;$('beastAddress').value=c.listeners.beast.address;$('beastPort').value=c.listeners.beast.port;$('jsonEnabled').checked=c.listeners.jsonHttp.enabled;$('jsonAddress').value=c.listeners.jsonHttp.address;$('jsonPort').value=c.listeners.jsonHttp.port;$('adminEnabled').checked=c.admin.enabled;$('adminAddress').value=c.admin.address;$('adminPort').value=c.admin.port}function collect(){let c=JSON.parse($('config').value);c.receiver.name=$('receiverName').value;c.receiver.latitude=num('latitude');c.receiver.longitude=num('longitude');c.receiver.altitudeMeters=num('altitude');c.receiver.gain=$('gain').value==='auto'?'auto':num('gain');c.network.ethernet.enabled=$('ethernetEnabled').checked;c.network.wifi.configured=$('wifiConfigured').checked;collectNet('ethernet',c.network.ethernet);collectNet('wifi',c.network.wifi);c.listeners.beast={enabled:$('beastEnabled').checked,address:$('beastAddress').value,port:num('beastPort')};c.listeners.jsonHttp={enabled:$('jsonEnabled').checked,address:$('jsonAddress').value,port:num('jsonPort')};c.admin.enabled=$('adminEnabled').checked;c.admin.address=$('adminAddress').value;c.admin.port=num('adminPort');return c}async function load(){let [s,c]=await Promise.all([get('/api/status'),get('/api/config')]);$('status').textContent=JSON.stringify(s,null,2);show(c);$('mode').textContent='Mode: '+s.mode;if(s.mode==='configuration')$('setup').className=''}
 $('apply').onclick=async()=>{try{$('result').textContent='Applying...';let body={config:collect(),adminPassword:$('adminPassword').value};if($('ssid').value)body.wifi={ssid:$('ssid').value,password:$('wifiPassword').value};let r=await fetch('/api/apply',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(body)});$('result').textContent=await r.text()}catch(e){$('result').textContent=String(e)}};load().catch(e=>$('status').textContent=e);</script></body></html>"""
 
 
@@ -116,6 +117,8 @@ class Handler(BaseHTTPRequestHandler):
         ):
             self.send_json(403, {"error": "CSRF validation failed"})
             return
+        error_path = config_module.STATE / "last-apply-error.json"
+        previous_error_mtime = error_path.stat().st_mtime_ns if error_path.exists() else None
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if not 0 < length <= 131072:
@@ -132,16 +135,20 @@ class Handler(BaseHTTPRequestHandler):
             if wifi is not None:
                 if not isinstance(wifi, dict) or set(wifi) != {"ssid", "password"}:
                     raise ValueError("wifi must contain only ssid and password")
-                config_module.configure_wifi(wifi["ssid"], wifi["password"], config["network"]["wifi"]["interface"])
                 config["network"]["wifi"]["configured"] = True
             if mode == "configuration":
                 config["setupComplete"] = True
-                config_module.validate(config)
-            if admin_password:
-                config_module.atomic_write(config_module.ETC / "admin-password.json", config_module.canonical(config_module.hash_password(admin_password)))
+            config_module.validate(config)
+            staged_credential = config_module.hash_password(admin_password) if admin_password else None
+            network_transactions = config_module.configure_network(config, wifi, mode == "configuration")
             pending = config_module.RUN / "pending-config.json"
-            config_module.atomic_write(pending, config_module.canonical(config))
-            changed = config_module.apply(pending)
+            try:
+                config_module.atomic_write(pending, config_module.canonical(config))
+                changed = config_module.apply(pending, staged_credential=staged_credential)
+            except Exception:
+                for transaction in reversed(network_transactions):
+                    config_module.restore_network(transaction)
+                raise
             if mode == "configuration":
                 subprocess.run(["/usr/local/sbin/adsb-network-mode", "teardown"], check=False, capture_output=True)
                 self.send_json(200, {"applied": changed, "rebooting": True})
@@ -150,7 +157,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, {"applied": changed, "rebooting": False})
                 subprocess.run(["systemctl", "try-restart", "--no-block", "adsb-admin.service"], check=False, capture_output=True)
         except Exception as error:
-            config_module.record_error("web-apply", error)
+            current_error_mtime = error_path.stat().st_mtime_ns if error_path.exists() else None
+            if current_error_mtime == previous_error_mtime:
+                config_module.record_error("web-apply", error)
             self.send_json(400, {"error": str(error)[:500]})
 
     def log_message(self, fmt, *args):

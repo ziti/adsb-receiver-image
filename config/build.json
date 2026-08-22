@@ -1,5 +1,5 @@
 {
-  "imageVersion": "2026.08.22.1",
+  "imageVersion": "2026.08.22.2",
   "armbian": {
     "repository": "https://github.com/armbian/build.git",
     "revision": "0620eb67885d19aeabd62655e60870ffd1efad63",

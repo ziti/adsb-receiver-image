@@ -12,6 +12,10 @@ User=root
 ProtectHome=yes
 ProtectSystem=strict
 ReadWritePaths=/var/lib/adsb-receiver
+NoNewPrivileges=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

@@ -78,7 +78,7 @@ def wired_address(interface: str) -> str | None:
         records = json.loads(result.stdout)
         for address in records[0].get("addr_info", []):
             candidate = ipaddress.ip_address(address.get("local", ""))
-            if address.get("family") == "inet" and not candidate.is_loopback and not candidate.is_link_local and address.get("scope") == "global":
+            if address.get("family") == "inet" and config_module.is_rfc1918(candidate) and address.get("scope") == "global":
                 return str(candidate)
     except (ValueError, IndexError, json.JSONDecodeError):
         return None
@@ -139,24 +139,22 @@ def prepare() -> None:
             bind = address
         else:
             bind = config["configurationMode"]["apGateway"]
-        state = ensure_bootstrap(f"https://{bind}:8443/")
+        state = ensure_bootstrap(f"https://{bind}:{config_module.SETUP_PORT}/")
         if not address:
             activate_ap(state, config["network"]["wifi"]["interface"])
         config_module.atomic_write(config_module.RUN / "mode", b"configuration\n", 0o644)
         config_module.atomic_write(config_module.RUN / "admin-bind", (bind + "\n").encode(), 0o644)
-        config_module.consume_recovery_marker()
     else:
         deactivate_ap()
         prefer_ethernet(config["network"]["ethernet"]["interface"])
         config_module.atomic_write(config_module.RUN / "mode", b"run\n", 0o644)
         config_module.atomic_write(config_module.RUN / "admin-bind", (config["admin"]["address"] + "\n").encode(), 0o644)
+    config_module.run_systemctl("try-restart", "adsb-firewall.service", check=True)
 
 
 def teardown() -> None:
     deactivate_ap()
-    for path in (config_module.BOOT / "setup-credentials.txt", config_module.STATE / "bootstrap-state.json"):
-        if path.exists():
-            os.unlink(path)
+    config_module.complete_configuration_mode()
 
 
 if __name__ == "__main__":
