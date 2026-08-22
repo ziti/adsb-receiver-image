@@ -344,6 +344,16 @@ def main() -> None:
     readsb_unit = (ROOT / "userpatches/overlay/etc/systemd/system/readsb.service").read_text()
     if "adsb-config-agent" in readsb_unit or "network-online.target" in readsb_unit:
         fail("readsb startup must not depend on the retired remote configuration path or internet access")
+    config_runtime = (ROOT / "userpatches/overlay/usr/local/sbin/adsb-config").read_text()
+    network_runtime = (ROOT / "userpatches/overlay/usr/local/sbin/adsb-network-mode").read_text()
+    initialize_unit = (ROOT / "userpatches/overlay/etc/systemd/system/adsb-initialize.service").read_text()
+    for contract in ("preflight_admin_endpoint", "local_ipv4_addresses", "clear_loaded_networkmanager_state", '"FSTYPE,LABEL"', 'fields != ["vfat", "ADSB-BOOT"]'):
+        if contract not in config_runtime:
+            fail(f"adsb-config is missing durability contract: {contract}")
+    if "config_module.validate_bootstrap_mount()" not in network_runtime:
+        fail("configuration-mode bootstrap must validate the ADSB-BOOT mount before writing credentials")
+    if "After=NetworkManager.service" not in initialize_unit or "Wants=NetworkManager.service" not in initialize_unit:
+        fail("factory-reset initialization must run after the local NetworkManager daemon starts")
     required_runtime = {
         "usr/local/sbin/adsb-config",
         "usr/local/sbin/adsb-network-mode",

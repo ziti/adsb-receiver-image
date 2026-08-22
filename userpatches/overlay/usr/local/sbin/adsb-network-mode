@@ -40,6 +40,7 @@ def ensure_tls() -> str:
 
 
 def ensure_bootstrap(url: str) -> dict:
+    config_module.validate_bootstrap_mount()
     state_path = config_module.STATE / "bootstrap-state.json"
     credential_path = config_module.BOOT / "setup-credentials.txt"
     if state_path.exists():

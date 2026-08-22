@@ -33,6 +33,8 @@ Active configuration is `/etc/adsb-receiver/config.json`. Generated readsb argum
 
 The image has two explicit partitions: an ext4 root filesystem and a 128 MiB FAT32 data partition labeled `ADSB-BOOT`. The latter mounts at `/boot/adsb-bootstrap` with `nosuid,nodev,noexec,umask=0077`. It is limited to temporary setup credentials, recovery and factory-reset markers, and future narrowly scoped bootstrap metadata. Configuration, password hashes, Wi-Fi profiles, and TLS private keys remain on the root filesystem.
 
+Before generating `setup-credentials.txt` or accepting a local recovery request, the appliance requires `findmnt` to identify `/boot/adsb-bootstrap` as the mounted `vfat` volume labeled `ADSB-BOOT`. A missing or incorrect mount fails configuration-mode bootstrap loudly instead of writing credentials into the root filesystem fallback directory.
+
 `readsb.service` depends only on the installed local configuration. A factory configuration is rendered into the image, so first boot starts decoding even without Ethernet, Wi-Fi, DNS, internet access, or receiver coordinates. Coordinates are required before setup can be completed.
 
 ## Hardware targets
@@ -74,7 +76,7 @@ The full Armbian build requires a privileged Docker-capable Linux host with at l
 ./build.sh orangepi-zero3
 ```
 
-GitHub Actions is authoritative. `.github/workflows/validate.yml` runs the cheap gate. `.github/workflows/build-image.yml` is manual and uses the official Armbian Action pinned to `0620eb67885d19aeabd62655e60870ffd1efad63`. Appliance version `2026.08.22.2` is distinct from Armbian's internal version. The workflow injects the exact repository commit, then inspects each completed image with `scripts/inspect-built-image.sh`. Matrix builds upload to one prerelease; a dependent job promotes it only after both targets pass inspection and metadata assembly. Build artifacts include the compressed image, checksum, partition and filesystem evidence, target snapshot, framework and OS revisions, kernel revision, readsb revision, and available Armbian source metadata.
+GitHub Actions is authoritative. `.github/workflows/validate.yml` runs the cheap gate. `.github/workflows/build-image.yml` is manual and uses the official Armbian Action pinned to `0620eb67885d19aeabd62655e60870ffd1efad63`. Appliance version `2026.08.22.3` is distinct from Armbian's internal version. The workflow injects the exact repository commit, then inspects each completed image with `scripts/inspect-built-image.sh`. Matrix builds upload to one prerelease; a dependent job promotes it only after both targets pass inspection and metadata assembly. Build artifacts include the compressed image, checksum, partition and filesystem evidence, target snapshot, framework and OS revisions, kernel revision, readsb revision, and available Armbian source metadata.
 
 The partition inspector asserts a root partition, vfat partition 2 labeled `ADSB-BOOT`, the root fstab mount contract, installed release metadata, and absence of persistent configuration, hashes, or PEM files on the FAT volume. Only a successful full Linux image build can prove that resulting disk layout. Repository checks prove the extension and inspection wiring, not the emitted image.
 
@@ -90,13 +92,13 @@ The partition inspector asserts a root partition, vfat partition 2 labeled `ADSB
 Checksum example:
 
 ```fish
-shasum -a 256 -c adsb-receiver-orangepi-zero3-2026.08.22.2.img.xz.sha256
+shasum -a 256 -c adsb-receiver-orangepi-zero3-2026.08.22.3.img.xz.sha256
 ```
 
 Expected result:
 
 ```text
-adsb-receiver-orangepi-zero3-2026.08.22.2.img.xz: OK
+adsb-receiver-orangepi-zero3-2026.08.22.3.img.xz: OK
 ```
 
 If wired Ethernet has a usable DHCP address, Ethernet stays active and the setup file names its HTTPS URL. If Ethernet has no usable address, NetworkManager starts `ADSB-SETUP-<device suffix>` on `192.168.77.0/24`; the fixed gateway and setup URL are `https://192.168.77.1:8443/`. No separate `hostapd`, `dnsmasq`, or unmanaged `wpa_supplicant` configuration is installed.
@@ -186,6 +188,8 @@ Important rules:
 - The setup subnet, gateway, recovery marker, and factory-reset marker are fixed safety contracts.
 
 An apply is a bounded transaction over the active config, generated readsb arguments, generated nftables rules, affected services, and an optional staged administrator credential. Files are written atomically, firewall/readsb/JSON services restart, then health must remain good for 5 seconds within an 8-second deadline. Promotion requires active services, the configured Beast socket, valid local `aircraft.json` HTTP output and generated receiver metadata when JSON is enabled, plus a loaded `inet adsb_receiver` nftables table.
+
+Before any candidate with run-mode administration enabled can enter that transaction, its address must be loopback or currently assigned to a local interface. If its address or port differs from the running admin endpoint, the appliance must also bind a temporary socket to the candidate endpoint successfully. A failed ownership or bind check rejects the candidate before config or LKG changes.
 
 On candidate failure, the previous config, args, firewall file, and credential are restored; firewall/readsb/JSON are restarted and the restored configuration receives the same health check. `last-known-good.json` is unchanged. A rollback failure is recorded distinctly in `last-apply-error.json` and creates a persistent recovery latch. Backup retention is one previous generation per managed file.
 
@@ -278,7 +282,7 @@ printf 'ADSB-RECEIVER-FACTORY-RESET\n' > /Volumes/ADSB-BOOT/factory-reset
 diskutil unmount /Volumes/ADSB-BOOT
 ```
 
-At boot, factory reset takes precedence over recovery. The request is durably latched before the FAT marker is removed. Reset is idempotent across a restart: the latch remains until deletion and factory-config regeneration complete. The next network-mode start creates new per-device setup credentials and enters first boot.
+At boot, factory reset takes precedence over recovery. The request is durably latched before the FAT marker is removed. Initialization starts after the local NetworkManager daemon, removes loaded `adsb-wifi`, `adsb-ethernet`, candidate, and setup-AP connection objects, reloads NetworkManager, then removes their persistent keyfiles. Reset is idempotent across a restart: the latch remains until runtime cleanup, file deletion, and factory-config regeneration complete. The next network-mode start creates new per-device setup credentials and enters first boot.
 
 ## Version status and diagnostics
 

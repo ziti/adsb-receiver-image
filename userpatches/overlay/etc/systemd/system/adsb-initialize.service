@@ -1,6 +1,8 @@
 [Unit]
 Description=Initialize local ADS-B receiver configuration
 RequiresMountsFor=/boot/adsb-bootstrap
+After=NetworkManager.service
+Wants=NetworkManager.service
 Before=readsb.service adsb-firewall.service adsb-network-mode.service adsb-json-http.service adsb-admin.service
 
 [Service]

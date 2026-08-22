@@ -254,6 +254,72 @@ def listener_host(address: str) -> str:
     return "127.0.0.1" if address == "0.0.0.0" else address
 
 
+def local_ipv4_addresses() -> set[str]:
+    result = subprocess.run(["ip", "-json", "address", "show"], capture_output=True, text=True, timeout=5)
+    if result.returncode:
+        raise RuntimeError("unable to inspect locally assigned IPv4 addresses")
+    try:
+        return {
+            item["local"]
+            for interface in json.loads(result.stdout)
+            for item in interface.get("addr_info", [])
+            if item.get("family") == "inet" and isinstance(item.get("local"), str)
+        }
+    except (KeyError, TypeError, json.JSONDecodeError) as error:
+        raise RuntimeError("unable to parse locally assigned IPv4 addresses") from error
+
+
+def runtime_admin_endpoint() -> tuple[str, int] | None:
+    if not (RUN / "mode").exists() or not (RUN / "admin-bind").exists():
+        return None
+    if run_systemctl("is-active", "--quiet", "adsb-admin.service").returncode:
+        return None
+    try:
+        mode = (RUN / "mode").read_text().strip()
+        address = (RUN / "admin-bind").read_text().strip()
+        if mode == "configuration":
+            return address, SETUP_PORT
+        active = validate(json.loads((ETC / "config.json").read_text()))
+        return address, active["admin"]["port"]
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def preflight_admin_endpoint(config: dict, current_endpoint: tuple[str, int] | None = None) -> None:
+    admin = config["admin"]
+    if not admin["enabled"]:
+        return
+    address, port = admin["address"], admin["port"]
+    parsed = ipaddress.ip_address(address)
+    if not parsed.is_loopback and address not in local_ipv4_addresses():
+        raise ValueError(f"admin.address {address} is not assigned to a local interface")
+    candidate = (address, port)
+    if current_endpoint == candidate:
+        return
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind(candidate)
+    except OSError as error:
+        raise ValueError(f"admin endpoint {address}:{port} is not bindable: {error}") from error
+    finally:
+        probe.close()
+
+
+def validate_bootstrap_mount() -> None:
+    if not BOOT.is_dir() or BOOT.is_symlink():
+        raise RuntimeError(f"bootstrap path {BOOT} is not a safe directory")
+    result = subprocess.run(
+        ["findmnt", "-n", "--raw", "-o", "FSTYPE,LABEL", "--target", str(BOOT)],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    fields = result.stdout.split()
+    if result.returncode or fields != ["vfat", "ADSB-BOOT"]:
+        observed = " ".join(fields) if fields else "not mounted"
+        raise RuntimeError(f"bootstrap path {BOOT} must be the vfat ADSB-BOOT volume; found {observed}")
+
+
 def health_probe(config: dict) -> list[str]:
     errors = []
     for unit in ("readsb.service", "adsb-json-http.service"):
@@ -313,11 +379,13 @@ def restore_files(saved: dict[Path, bytes | None], modes: dict[Path, int]) -> No
             atomic_write(path, data, modes.get(path, 0o600))
 
 
-def apply(config_path: Path, initial: bool = False, staged_credential: dict | None = None, health=wait_for_health) -> bool:
+def apply(config_path: Path, initial: bool = False, staged_credential: dict | None = None, health=wait_for_health, current_admin_endpoint: tuple[str, int] | None = None) -> bool:
     config = validate(json.loads(config_path.read_text()))
     credential_path = ETC / "admin-password.json"
     if config["setupComplete"] and config["admin"]["enabled"] and staged_credential is None and not credential_path.exists():
         raise ValueError("a valid administrator credential is required before enabling run-mode administration")
+    if not initial:
+        preflight_admin_endpoint(config, current_admin_endpoint if current_admin_endpoint is not None else runtime_admin_endpoint())
     active, args_path, firewall_path, admin_bind = ETC / "config.json", STATE / "readsb.args", STATE / "firewall.nft", RUN / "admin-bind"
     setup_mode = (RUN / "mode").exists() and (RUN / "mode").read_text().strip() == "configuration"
     paths = [active, args_path, firewall_path, credential_path, admin_bind]
@@ -400,6 +468,7 @@ def configuration_mode(config: dict) -> bool:
 
 
 def request_recovery() -> None:
+    validate_bootstrap_mount()
     atomic_write(BOOT / "recovery-request", RECOVERY_TEXT)
 
 
@@ -413,6 +482,7 @@ def factory_reset() -> None:
     latch = STATE / FACTORY_RESET_LATCH
     if not latch.exists():
         atomic_write(latch, b"pending\n")
+    clear_loaded_networkmanager_state()
     for path in (ETC / "config.json", ETC / "admin-password.json", ETC / "admin-cert.pem", ETC / "admin-key.pem", RUN / "pending-config.json", BOOT / "setup-credentials.txt", BOOT / "recovery-request", BOOT / "factory-reset"):
         if path.exists() or path.is_symlink():
             path.unlink()
@@ -427,6 +497,22 @@ def factory_reset() -> None:
         profile.unlink()
     apply(DEFAULT_CONFIG, initial=True)
     latch.unlink()
+
+
+def clear_loaded_networkmanager_state() -> None:
+    try:
+        running = run_systemctl("is-active", "--quiet", "NetworkManager.service").returncode == 0
+    except OSError:
+        running = False
+    if not running:
+        return
+    loaded = nmcli("-t", "-f", "NAME", "connection", "show", check=True)
+    loaded_names = set(loaded.stdout.splitlines())
+    for connection in ("adsb-wifi-candidate", "adsb-wifi", "adsb-ethernet", "adsb-setup-ap"):
+        if connection in loaded_names:
+            nmcli("connection", "down", connection)
+            nmcli("connection", "delete", connection, check=True)
+    nmcli("connection", "reload", check=True)
 
 
 def hash_password(password: str) -> dict:

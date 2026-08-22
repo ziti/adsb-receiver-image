@@ -144,7 +144,11 @@ class Handler(BaseHTTPRequestHandler):
             pending = config_module.RUN / "pending-config.json"
             try:
                 config_module.atomic_write(pending, config_module.canonical(config))
-                changed = config_module.apply(pending, staged_credential=staged_credential)
+                changed = config_module.apply(
+                    pending,
+                    staged_credential=staged_credential,
+                    current_admin_endpoint=(self.server.server_address[0], self.server.server_address[1]),
+                )
             except Exception:
                 for transaction in reversed(network_transactions):
                     config_module.restore_network(transaction)

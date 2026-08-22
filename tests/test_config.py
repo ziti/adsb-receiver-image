@@ -8,7 +8,7 @@ import pathlib
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 ROOT = pathlib.Path(__file__).parents[1]
 CONFIG = ROOT / "userpatches/overlay/usr/local/sbin/adsb-config"
@@ -119,6 +119,50 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual("abc", (adsb.ETC / "repository-commit").read_text())
         self.assertFalse(json.loads((adsb.ETC / "config.json").read_text())["setupComplete"])
 
+    def test_factory_reset_removes_loaded_networkmanager_connections(self):
+        (adsb.STATE / adsb.FACTORY_RESET_LATCH).write_text("pending\n")
+        calls = []
+        def fake_nmcli(*arguments, **_kwargs):
+            calls.append(arguments)
+            if arguments == ("-t", "-f", "NAME", "connection", "show"):
+                return subprocess.CompletedProcess(arguments, 0, "adsb-wifi\nadsb-ethernet\nadsb-setup-ap\n", "")
+            return subprocess.CompletedProcess(arguments, 0, "", "")
+        with patch.object(adsb, "run_systemctl", return_value=subprocess.CompletedProcess([], 0)), patch.object(adsb, "nmcli", side_effect=fake_nmcli):
+            adsb.factory_reset()
+        for connection in ("adsb-wifi", "adsb-ethernet", "adsb-setup-ap"):
+            self.assertIn(("connection", "down", connection), calls)
+            self.assertIn(("connection", "delete", connection), calls)
+        self.assertIn(("connection", "reload"), calls)
+
+    def test_factory_reset_keeps_latch_when_loaded_connection_delete_fails(self):
+        latch = adsb.STATE / adsb.FACTORY_RESET_LATCH
+        latch.write_text("pending\n")
+        def fake_nmcli(*arguments, **_kwargs):
+            if arguments == ("-t", "-f", "NAME", "connection", "show"):
+                return subprocess.CompletedProcess(arguments, 0, "adsb-wifi\n", "")
+            if arguments == ("connection", "delete", "adsb-wifi"):
+                raise subprocess.CalledProcessError(10, arguments)
+            return subprocess.CompletedProcess(arguments, 0, "", "")
+        with patch.object(adsb, "run_systemctl", return_value=subprocess.CompletedProcess([], 0)), patch.object(adsb, "nmcli", side_effect=fake_nmcli):
+            with self.assertRaises(subprocess.CalledProcessError):
+                adsb.factory_reset()
+        self.assertTrue(latch.exists())
+
+    def test_bootstrap_mount_requires_expected_vfat_label(self):
+        valid = subprocess.CompletedProcess([], 0, "vfat ADSB-BOOT\n", "")
+        with patch.object(adsb.subprocess, "run", return_value=valid):
+            adsb.validate_bootstrap_mount()
+        wrong = subprocess.CompletedProcess([], 0, "ext4 armbi_root\n", "")
+        with patch.object(adsb.subprocess, "run", return_value=wrong):
+            with self.assertRaisesRegex(RuntimeError, "must be the vfat ADSB-BOOT volume"):
+                adsb.validate_bootstrap_mount()
+
+    def test_recovery_request_refuses_root_filesystem_fallback(self):
+        with patch.object(adsb.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "")):
+            with self.assertRaisesRegex(RuntimeError, "not mounted"):
+                adsb.request_recovery()
+        self.assertFalse((adsb.BOOT / "recovery-request").exists())
+
     def test_apply_commits_credential_only_after_health(self):
         adsb.apply(self.candidate(), initial=True, staged_credential=adsb.hash_password("original credential value"))
         old_credential = (adsb.ETC / "admin-password.json").read_bytes()
@@ -135,7 +179,7 @@ class ConfigurationTests(unittest.TestCase):
                 raise RuntimeError("new runtime unhealthy")
         with patch.object(adsb, "run_systemctl", return_value=subprocess.CompletedProcess([], 0, "", "")):
             with self.assertRaisesRegex(RuntimeError, "unhealthy"):
-                adsb.apply(self.candidate(changed), staged_credential=adsb.hash_password("replacement credential"), health=health)
+                adsb.apply(self.candidate(changed), staged_credential=adsb.hash_password("replacement credential"), health=health, current_admin_endpoint=("127.0.0.1", 8443))
         self.assertEqual(old_credential, (adsb.ETC / "admin-password.json").read_bytes())
         self.assertEqual(old_args, (adsb.STATE / "readsb.args").read_bytes())
         self.assertEqual(old_firewall, (adsb.STATE / "firewall.nft").read_bytes())
@@ -146,8 +190,32 @@ class ConfigurationTests(unittest.TestCase):
     def test_successful_apply_commits_staged_credential(self):
         credential = adsb.hash_password("new administrator credential")
         with patch.object(adsb, "run_systemctl", return_value=subprocess.CompletedProcess([], 0, "", "")):
-            adsb.apply(self.candidate(), staged_credential=credential, health=lambda _config: None)
+            adsb.apply(self.candidate(), staged_credential=credential, health=lambda _config: None, current_admin_endpoint=("127.0.0.1", 8443))
         self.assertTrue(adsb.password_matches("new administrator credential", json.loads((adsb.ETC / "admin-password.json").read_text())))
+
+    def test_admin_preflight_rejects_unassigned_address_before_lkg_promotion(self):
+        adsb.apply(self.candidate(), initial=True, staged_credential=adsb.hash_password("original credential value"))
+        old_lkg = (adsb.STATE / "last-known-good.json").read_bytes()
+        changed = copy.deepcopy(VALID)
+        changed["admin"]["address"] = "192.168.50.99"
+        with patch.object(adsb, "local_ipv4_addresses", return_value={"192.168.50.40"}):
+            with self.assertRaisesRegex(ValueError, "not assigned"):
+                adsb.apply(self.candidate(changed), health=lambda _config: None)
+        self.assertEqual(old_lkg, (adsb.STATE / "last-known-good.json").read_bytes())
+        self.assertEqual("127.0.0.1", json.loads((adsb.ETC / "config.json").read_text())["admin"]["address"])
+
+    def test_admin_preflight_rejects_unbindable_changed_port(self):
+        probe = MagicMock()
+        probe.bind.side_effect = OSError("address already in use")
+        with patch.object(adsb.socket, "socket", return_value=probe):
+            with self.assertRaisesRegex(ValueError, "not bindable"):
+                adsb.preflight_admin_endpoint(VALID, ("127.0.0.1", 9443))
+        probe.close.assert_called_once()
+
+    def test_admin_preflight_does_not_rebind_current_endpoint(self):
+        with patch.object(adsb.socket, "socket") as socket_constructor:
+            adsb.preflight_admin_endpoint(VALID, ("127.0.0.1", 8443))
+        socket_constructor.assert_not_called()
 
     def test_rollback_failure_is_distinct_and_forces_recovery(self):
         adsb.apply(self.candidate(), initial=True, staged_credential=adsb.hash_password("original credential value"))
@@ -155,7 +223,7 @@ class ConfigurationTests(unittest.TestCase):
         changed["receiver"]["name"] = "changed"
         with patch.object(adsb, "run_systemctl", side_effect=[subprocess.CompletedProcess([], 0), subprocess.CompletedProcess([], 0), subprocess.CompletedProcess([], 0), RuntimeError("rollback restart failed")]):
             with self.assertRaisesRegex(RuntimeError, "rollback failed"):
-                adsb.apply(self.candidate(changed), health=lambda _config: (_ for _ in ()).throw(RuntimeError("apply health failed")))
+                adsb.apply(self.candidate(changed), health=lambda _config: (_ for _ in ()).throw(RuntimeError("apply health failed")), current_admin_endpoint=("127.0.0.1", 8443))
         self.assertTrue((adsb.STATE / adsb.RECOVERY_LATCH).exists())
         self.assertIn("failed", json.loads((adsb.STATE / "last-apply-error.json").read_text())["rollback"])
 
