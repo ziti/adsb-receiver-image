@@ -31,6 +31,8 @@ flowchart LR
 
 Active configuration is `/etc/adsb-receiver/config.json`. Generated readsb arguments, the last-known-good configuration, rollback material, bootstrap state, and the last apply error live under `/var/lib/adsb-receiver/`. Wi-Fi secrets live only in root-readable NetworkManager keyfiles. Administrator passwords are stored as salted scrypt hashes. They are not part of the JSON configuration.
 
+The image has two explicit partitions: an ext4 root filesystem and a 128 MiB FAT32 data partition labeled `ADSB-BOOT`. The latter mounts at `/boot/adsb-bootstrap` with `nosuid,nodev,noexec,umask=0077`. It is limited to temporary setup credentials, recovery and factory-reset markers, and future narrowly scoped bootstrap metadata. Configuration, password hashes, Wi-Fi profiles, and TLS private keys remain on the root filesystem.
+
 `readsb.service` depends only on the installed local configuration. A factory configuration is rendered into the image, so first boot starts decoding even without Ethernet, Wi-Fi, DNS, internet access, or receiver coordinates. Coordinates are required before setup can be completed.
 
 ## Hardware targets
@@ -51,7 +53,9 @@ Run cheap checks before an image build:
 ```fish
 python3 scripts/validate_repository.py
 python3 -m unittest discover -s tests -v
-bash -n build.sh userpatches/customize-image.sh userpatches/extensions/adsb-kernel-pin.sh userpatches/overlay/etc/adsb-receiver/build-inputs.sh
+bash -n build.sh userpatches/customize-image.sh userpatches/extensions/adsb-kernel-pin.sh userpatches/extensions/adsb-bootstrap-partition.sh scripts/inspect-built-image.sh
+shellcheck build.sh userpatches/customize-image.sh userpatches/extensions/*.sh scripts/inspect-built-image.sh
+actionlint .github/workflows/*.yml
 git diff --check
 ```
 
@@ -70,7 +74,9 @@ The full Armbian build requires a privileged Docker-capable Linux host with at l
 ./build.sh orangepi-zero3
 ```
 
-GitHub Actions is authoritative. `.github/workflows/validate.yml` runs the cheap gate. `.github/workflows/build-image.yml` is manual and uses the official Armbian Action pinned to `0620eb67885d19aeabd62655e60870ffd1efad63`. Appliance version `2026.08.22.1` is distinct from Armbian's internal version. Build artifacts include the compressed image, checksum, target snapshot, framework and OS revisions, kernel revision, readsb revision, and available Armbian source metadata.
+GitHub Actions is authoritative. `.github/workflows/validate.yml` runs the cheap gate. `.github/workflows/build-image.yml` is manual and uses the official Armbian Action pinned to `0620eb67885d19aeabd62655e60870ffd1efad63`. Appliance version `2026.08.22.2` is distinct from Armbian's internal version. The workflow injects the exact repository commit, then inspects each completed image with `scripts/inspect-built-image.sh`. Matrix builds upload to one prerelease; a dependent job promotes it only after both targets pass inspection and metadata assembly. Build artifacts include the compressed image, checksum, partition and filesystem evidence, target snapshot, framework and OS revisions, kernel revision, readsb revision, and available Armbian source metadata.
+
+The partition inspector asserts a root partition, vfat partition 2 labeled `ADSB-BOOT`, the root fstab mount contract, installed release metadata, and absence of persistent configuration, hashes, or PEM files on the FAT volume. Only a successful full Linux image build can prove that resulting disk layout. Repository checks prove the extension and inspection wiring, not the emitted image.
 
 ## Flash and first boot
 
@@ -78,19 +84,19 @@ GitHub Actions is authoritative. `.github/workflows/validate.yml` runs the cheap
 2. Verify the checksum on macOS.
 3. Flash with Raspberry Pi Imager or Balena Etcher. Confirm the target disk twice because flashing overwrites it.
 4. Insert the card, connect the RTL-SDR, optionally connect Ethernet, and boot.
-5. On first boot, the appliance writes `adsb-receiver/setup-credentials.txt` to the writable boot partition. This file contains the per-device setup SSID, unique AP password, setup URL, one-time setup password, and TLS certificate fingerprint.
+5. On first boot, the appliance writes `setup-credentials.txt` at the root of the `ADSB-BOOT` FAT32 partition. This file contains the per-device setup SSID, unique AP password, setup URL, one-time setup password, and TLS certificate fingerprint.
 6. Power the receiver down, read that file from the card on another computer, then boot again. This awkward little card shuffle avoids the much worse design of a universal setup password.
 
 Checksum example:
 
 ```fish
-shasum -a 256 -c adsb-receiver-orangepi-zero3-2026.08.22.1.img.xz.sha256
+shasum -a 256 -c adsb-receiver-orangepi-zero3-2026.08.22.2.img.xz.sha256
 ```
 
 Expected result:
 
 ```text
-adsb-receiver-orangepi-zero3-2026.08.22.1.img.xz: OK
+adsb-receiver-orangepi-zero3-2026.08.22.2.img.xz: OK
 ```
 
 If wired Ethernet has a usable DHCP address, Ethernet stays active and the setup file names its HTTPS URL. If Ethernet has no usable address, NetworkManager starts `ADSB-SETUP-<device suffix>` on `192.168.77.0/24`; the fixed gateway and setup URL are `https://192.168.77.1:8443/`. No separate `hostapd`, `dnsmasq`, or unmanaged `wpa_supplicant` configuration is installed.
@@ -104,14 +110,15 @@ The onboarding page collects:
 - RTL-SDR gain, with `auto` recommended initially
 - Beast and JSON listener enablement, addresses, and ports
 - administrator password and run-mode management address
+- DHCP or static IPv4 settings for Ethernet and Wi-Fi
 
-The server validates Wi-Fi input, writes a candidate root-only NetworkManager profile, and activates it before installing the persistent profile. Secrets never appear in a command argument or request log. On successful setup it atomically applies configuration, stores the last-known-good copy, disables the AP, removes bootstrap material where supported, and reboots into run mode.
+The server validates Wi-Fi input, writes a candidate root-only NetworkManager profile, activates and verifies it, then installs and verifies the final profile. Candidate objects and files are always removed. Failure restores the prior appliance-managed profile and connection state where NetworkManager permits. Secrets never appear in a command argument or request log. On successful setup it completes the configuration transaction, invalidates the one-time credential by removing bootstrap state, removes `setup-credentials.txt` when the FAT volume is writable, disables the AP, and reboots into run mode. A stale setup file can remain after abrupt power loss, but its setup credential becomes invalid after successful completion.
 
 ## Run-mode networking
 
-Ethernet and configured Wi-Fi can remain enabled together. The appliance sets the active Ethernet connection route metric to `100`; its generated Wi-Fi profile uses `600`, so Ethernet is preferred and Wi-Fi remains fallback. Loss of an uplink does not stop local decoding.
+NetworkManager owns both generated profiles. Ethernet and configured Wi-Fi support DHCP, the default, or static IPv4 with `address`, `prefixLength`, optional `gateway`, and up to four `dns` addresses. Wi-Fi secrets remain only in its root-readable keyfile. Ethernet uses route metric `100`; Wi-Fi uses `600`, so Ethernet is preferred and Wi-Fi remains fallback. Loss of an uplink does not stop local decoding.
 
-Run mode never enters setup merely because Ethernet is down. The AP starts only for an incomplete first boot or a validated recovery marker. NetworkManager owns managed network state throughout.
+Run mode never enters setup merely because Ethernet is down. Configuration mode uses wired Ethernet only when it has an RFC1918 address in `10/8`, `172.16/12`, or `192.168/16`. Loopback, link-local, documentation, and publicly routed addresses are ineligible, so the appliance uses its temporary AP instead. The setup HTTPS port is added explicitly to the private-source nftables policy and does not depend on run-mode admin settings.
 
 ## Consumer endpoints
 
@@ -166,7 +173,7 @@ The pinned readsb revision accepts receiver latitude and longitude but does not 
 
 ## Local configuration contract
 
-The machine-readable schema is `schemas/receiver-config.schema.json`; a complete example is `examples/local-config.json`. Schema version 2 rejects unknown fields and arbitrary readsb arguments. Supported advanced options are limited to PPM correction and maximum range.
+The machine-readable schema is `schemas/receiver-config.schema.json`; a complete example is `examples/local-config.json`. Schema version 3 rejects unknown fields and arbitrary readsb arguments. Version 3 is an intentional breaking migration from version 2: add an `ipv4` object to each network interface, add the factory-reset marker contract, change marker paths to `/boot/adsb-bootstrap`, and remove `outboundConnectors`. Existing version 2 files must be migrated through configuration mode rather than applied unchanged.
 
 Important rules:
 
@@ -175,8 +182,12 @@ Important rules:
 - Beast and JSON addresses can be `0.0.0.0`, loopback, link-local, or a private IPv4 address.
 - Admin cannot bind `0.0.0.0` or a public literal address. It defaults to localhost.
 - Wi-Fi and administrator secrets are not schema fields.
-- Optional outbound connectors support only `beast_out` and `beast_reduce_plus_out`.
-- The setup subnet, gateway, and recovery marker are fixed safety contracts.
+- The appliance never forwards to tracking sites. Use `adsb-feeder` or another external Beast/JSON consumer for that responsibility.
+- The setup subnet, gateway, recovery marker, and factory-reset marker are fixed safety contracts.
+
+An apply is a bounded transaction over the active config, generated readsb arguments, generated nftables rules, affected services, and an optional staged administrator credential. Files are written atomically, firewall/readsb/JSON services restart, then health must remain good for 5 seconds within an 8-second deadline. Promotion requires active services, the configured Beast socket, valid local `aircraft.json` HTTP output and generated receiver metadata when JSON is enabled, plus a loaded `inet adsb_receiver` nftables table.
+
+On candidate failure, the previous config, args, firewall file, and credential are restored; firewall/readsb/JSON are restarted and the restored configuration receives the same health check. `last-known-good.json` is unchanged. A rollback failure is recorded distinctly in `last-apply-error.json` and creates a persistent recovery latch. Backup retention is one previous generation per managed file.
 
 Validate and apply locally on the appliance:
 
@@ -228,16 +239,15 @@ Compare every byte with the fingerprint obtained from the boot-partition setup f
 
 To request configuration mode on the next boot:
 
-1. Power down the appliance and mount its writable boot partition on another computer.
-2. Create `adsb-receiver/recovery-request` containing exactly `ADSB-RECEIVER-CONFIG-MODE` plus one newline.
+1. Power down the appliance and mount the FAT32 volume labeled `ADSB-BOOT` on another computer.
+2. Create `recovery-request` at the volume root containing exactly `ADSB-RECEIVER-CONFIG-MODE` plus one newline.
 3. Reinsert the card and boot.
-4. Read the newly generated `adsb-receiver/setup-credentials.txt`, then use the wired setup URL or temporary AP.
+4. Read the newly generated `setup-credentials.txt`, then use the wired setup URL or temporary AP.
 
 Fish-friendly macOS example after confirming the exact mounted boot volume:
 
 ```fish
-mkdir -p /Volumes/ADSB-BOOT/adsb-receiver
-printf 'ADSB-RECEIVER-CONFIG-MODE\n' > /Volumes/ADSB-BOOT/adsb-receiver/recovery-request
+printf 'ADSB-RECEIVER-CONFIG-MODE\n' > /Volumes/ADSB-BOOT/recovery-request
 diskutil unmount /Volumes/ADSB-BOOT
 ```
 
@@ -247,7 +257,7 @@ Expected result:
 Volume ADSB-BOOT on disk... unmounted
 ```
 
-The appliance accepts only a regular file with exact content at the fixed path. A misspelled, oversized, symlinked, or differently formatted marker is ignored. Entering recovery mode does not expose a run-mode admin listener on every interface. After successful setup, the marker and temporary AP are removed.
+The appliance accepts only a regular file with exact bounded content at the fixed path. A misspelled, oversized, symlinked, or differently formatted marker is ignored. On boot it writes `/var/lib/adsb-receiver/recovery-latch` durably before removing the FAT marker. That latch survives reboot, setup failure, and power loss. It is cleared only after successful configuration completion, when the temporary AP, setup file, and one-time credential state are also removed. Merely starting the admin UI or authenticating does not clear it.
 
 If a bad configuration prevents readsb from staying active, apply automatically restores the previous files and records the error. An administrator can also invoke:
 
@@ -256,6 +266,34 @@ sudo adsb-config rollback
 ```
 
 Expected result: `readsb.service` returns to `active` using `/var/lib/adsb-receiver/last-known-good.json`. Reflashing is the final recovery path, not the first one.
+
+## Factory reset
+
+Factory reset is destructive to appliance-managed configuration. It removes active/LKG/previous configs, generated args and firewall state, admin hash, generated TLS certificate and private key, appliance-managed NetworkManager profiles, bootstrap state, errors, and other files under `/var/lib/adsb-receiver`. It preserves the OS, appliance binaries, `/etc/adsb-receiver-release`, injected source provenance, and the administrator's SSH authorized keys.
+
+After confirming the exact mounted volume, create the separate exact marker and safely unmount it:
+
+```fish
+printf 'ADSB-RECEIVER-FACTORY-RESET\n' > /Volumes/ADSB-BOOT/factory-reset
+diskutil unmount /Volumes/ADSB-BOOT
+```
+
+At boot, factory reset takes precedence over recovery. The request is durably latched before the FAT marker is removed. Reset is idempotent across a restart: the latch remains until deletion and factory-config regeneration complete. The next network-mode start creates new per-device setup credentials and enters first boot.
+
+## Version status and diagnostics
+
+`adsb-config status` reports image version, target ID, source commit or explicit `unavailable`, pinned Armbian and readsb revisions, Debian release, running kernel, installed readsb version, uptime, services, endpoints, mode, recovery/reset state, SDR detection, and the last redacted apply error.
+
+Generate a root-readable diagnostic archive from the CLI:
+
+```bash
+sudo adsb-config diagnostics /var/tmp/adsb-receiver-diagnostics.tar.gz
+sudo tar -tzf /var/tmp/adsb-receiver-diagnostics.tar.gz
+```
+
+The archive contains release/status metadata, redacted config, up to 400 recent appliance journal records, NetworkManager device state and redacted managed-profile metadata, addresses, routes, listening sockets, USB, disk use, nftables state, and recovery/apply state. It excludes profile PSKs, credential/hash documents, bootstrap state and passwords, TLS keys, authorization headers, and unrelated host files. The archive mode is `0600`; inspect it before sharing.
+
+The root-running admin and network-mode services need NetworkManager changes, protected file writes, service restarts, and reboot orchestration. Their units retain `ProtectSystem=strict`, `ProtectHome=yes`, narrow writable paths/address families, restrictive umasks, and `RestrictSUIDSGID=yes`. Initialize is a root oneshot with an empty capability set. readsb and the JSON server remain capability-free with `NoNewPrivileges=yes`; the firewall oneshot requires the host's nftables authority but no writable path beyond generated state.
 
 ## Troubleshooting
 
@@ -304,6 +342,19 @@ The mandatory signed config-server design, Minisign key, refresh timer, agent, C
 
 ## What validation does and does not prove
 
-Repository tests cover schema validation, deterministic readsb arguments, first boot without internet, configuration-mode decisions, exact recovery markers, atomic apply and rollback, secret redaction, password authentication, CSRF checks, NetworkManager keyfile generation, firewall policy, systemd structure, documentation constants, immutable build pins, and workflow action pins.
+Repository tests cover schema validation, connector rejection, deterministic readsb arguments, exact marker/latch selection, complete file rollback and rollback-failure recovery, bounded health decisions, transactional credentials, NetworkManager DHCP/static profile generation, Wi-Fi failure cleanup, RFC1918 setup selection, setup firewall policy, factory-reset file scope, diagnostics redaction, systemd structure, partition-extension contracts, immutable build pins, workflow action pins, and post-build inspection wiring.
 
-That evidence does not prove an image boots or that the board-specific Ethernet name, writable boot layout, Wi-Fi AP mode, NetworkManager shared addressing, USB power, RTL-SDR access, Beast stream, JSON compatibility, TLS browser flow, or consumer applications work on physical hardware. Those are acceptance tests, not vibes.
+That evidence does not prove an image boots or that the board-specific Ethernet name, FAT volume, Wi-Fi AP, NetworkManager activation, USB power, RTL-SDR, Beast stream, JSON consumers, TLS browser flow, recovery over real power loss, factory reset, or static routing work on hardware. Complete this checklist separately for both Orange Pi targets and do not mark an item from repository tests alone:
+
+- [ ] Mount `ADSB-BOOT` on macOS; read `setup-credentials.txt`; write exact recovery and factory-reset markers; safely unmount.
+- [ ] Enter recovery, confirm the FAT marker is consumed, interrupt power before completion, reboot back into recovery via the persistent latch, then complete setup and confirm latch removal.
+- [ ] Apply an intentionally nonfunctional listener candidate; confirm config, readsb args, nftables rules, every affected service, and LKG match the restored state.
+- [ ] Observe that LKG promotion happens only after the bounded 5-second stable interval.
+- [ ] Fail candidate Wi-Fi authentication and final activation; confirm no candidate object/file remains and the prior connection is restored.
+- [ ] In a controlled test network, give Ethernet only a globally routed address and confirm setup binds to the AP, not that address.
+- [ ] Perform FAT-marker factory reset; verify every documented mutable item is gone, preserved items remain, and first-boot setup returns.
+- [ ] Validate Ethernet static IPv4, Wi-Fi static IPv4, Ethernet metric preference, and Wi-Fi fallback.
+- [ ] Validate current real versions of `adsb-feeder`, SkySpy, and Aerodrome against the appliance endpoints.
+- [ ] Sustain at least three concurrent Beast clients and three concurrent JSON HTTP consumers.
+- [ ] Interrupt power in steady state, during or immediately after safe config apply, in recovery mode, and after Wi-Fi provisioning; verify the documented durable state each time.
+- [ ] Confirm RTL-SDR enumeration, readsb decoding, Beast frames, valid JSON including a zero-aircraft case, browser TLS/fingerprint flow, and both board-specific interface names.
