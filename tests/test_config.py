@@ -170,6 +170,22 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "timed out after 3s"):
             adsb.wait_for_health(VALID, timeout=3, stable_for=2, probe=lambda _config: ["JSON 503"], now=lambda: next(ticks), sleeper=lambda _seconds: None)
 
+    def test_json_initial_503_can_recover_before_deadline(self):
+        ticks = iter([0, 0, 1, 2, 3, 4, 5, 6])
+        attempts = []
+        def probe(_config):
+            attempts.append(1)
+            return ["JSON 503"] if len(attempts) <= 2 else []
+        adsb.wait_for_health(VALID, timeout=8, stable_for=3, probe=probe, now=lambda: next(ticks), sleeper=lambda _seconds: None)
+        self.assertGreaterEqual(len(attempts), 6)
+
+    def test_health_probe_reports_unavailable_beast_socket(self):
+        config = copy.deepcopy(VALID)
+        config["listeners"]["jsonHttp"]["enabled"] = False
+        with patch.object(adsb, "run_systemctl", return_value=subprocess.CompletedProcess([], 0)), patch.object(adsb.socket, "create_connection", side_effect=ConnectionRefusedError("refused")), patch.object(adsb.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
+            errors = adsb.health_probe(config)
+        self.assertTrue(any("Beast listener unavailable" in error for error in errors))
+
     def test_firewall_includes_setup_port_independent_of_run_admin(self):
         config = copy.deepcopy(VALID)
         config["admin"]["enabled"] = False
