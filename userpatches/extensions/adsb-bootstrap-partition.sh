@@ -38,9 +38,32 @@ function create_partition_table__950_adsb_bootstrap_partition() {
 
 function format_partitions__950_adsb_bootstrap_partition() {
 	local bootstrap_device="${LOOP}p2"
-	mkfs.fat -F 32 -n "${ADSB_BOOTSTRAP_LABEL}" "${bootstrap_device}"
+	local retry_count=0
+	local max_retries=5
+	
+	# Wait for the partition device to appear
+	while (( retry_count < max_retries )) && [[ ! -e "${bootstrap_device}" ]]; do
+		sleep 1
+		(( retry_count++ ))
+	done
+	
+	# Check if device exists before formatting
+	if [[ ! -e "${bootstrap_device}" ]]; then
+		display_alert "ADS-B bootstrap partition" "device ${bootstrap_device} not found after ${max_retries} attempts" "err"
+		return 1
+	fi
+	
+	if ! mkfs.fat -F 32 -n "${ADSB_BOOTSTRAP_LABEL}" "${bootstrap_device}"; then
+		display_alert "ADS-B bootstrap partition" "failed to format ${bootstrap_device}" "err"
+		return 1
+	fi
+	
 	install -d -m 0755 "${MOUNT}${ADSB_BOOTSTRAP_MOUNT}"
-	mount -o rw,nosuid,nodev,noexec,umask=0077 "${bootstrap_device}" "${MOUNT}${ADSB_BOOTSTRAP_MOUNT}"
+	if ! mount -o rw,nosuid,nodev,noexec,umask=0077 "${bootstrap_device}" "${MOUNT}${ADSB_BOOTSTRAP_MOUNT}"; then
+		display_alert "ADS-B bootstrap partition" "failed to mount ${bootstrap_device}" "err"
+		return 1
+	fi
+	
 	printf 'LABEL=%s %s vfat rw,nosuid,nodev,noexec,umask=0077,x-systemd.device-timeout=10s 0 2\n' \
 		"${ADSB_BOOTSTRAP_LABEL}" "${ADSB_BOOTSTRAP_MOUNT}" >> "${SDCARD}/etc/fstab"
 }
