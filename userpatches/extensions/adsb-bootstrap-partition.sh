@@ -34,6 +34,10 @@ function create_partition_table__950_adsb_bootstrap_partition() {
 	start=${root_start}, size=${root_sectors}, type=83
 	start=$(( root_start + root_sectors )), size=${bootstrap_sectors}, type=0c
 	EOF
+	# Force the kernel to re-read the new partition table so that the
+	# partition device nodes (e.g. /dev/loop0p2) are created before
+	# format_partitions runs.
+	partprobe "${LOOP}"
 }
 
 function format_partitions__950_adsb_bootstrap_partition() {
