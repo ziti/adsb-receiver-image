@@ -148,6 +148,28 @@ def validate_bootstrap_partition() -> None:
             fail(f"bootstrap partition extension is missing contract: {contract}")
     if '${SRC}/../custom' in text:
         fail("bootstrap partition extension must not access the action checkout outside Armbian userpatches")
+    create_hook = re.search(
+        r"^function create_partition_table__950_adsb_bootstrap_partition\(\) \{\n(?P<body>.*?)^\}\n",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    if not create_hook:
+        fail("bootstrap partition extension lacks its pre-loop create_partition_table hook")
+    create_body = create_hook.group("body")
+    if re.search(r"\bLOOP\b", create_body):
+        fail("bootstrap partition create hook must not reference LOOP before Armbian attaches it")
+    if "partprobe" in create_body:
+        fail("bootstrap partition create hook must not probe partitions before Armbian attaches LOOP")
+    format_hook = re.search(
+        r"^function format_partitions__950_adsb_bootstrap_partition\(\) \{\n(?P<body>.*?)^\}\n",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    if not format_hook:
+        fail("bootstrap partition extension lacks its post-loop format_partitions hook")
+    loop_partition_references = re.findall(r"\$\{LOOP\}p2", text)
+    if len(loop_partition_references) != 1 or "${LOOP}p2" not in format_hook.group("body"):
+        fail("bootstrap partition extension must use ${LOOP}p2 exactly once in format_partitions")
     canonical_schema = ROOT / "schemas/receiver-config.schema.json"
     image_schema = ROOT / "userpatches/overlay/usr/share/adsb-receiver/receiver-config.schema.json"
     if not image_schema.is_file() or image_schema.read_bytes() != canonical_schema.read_bytes():
