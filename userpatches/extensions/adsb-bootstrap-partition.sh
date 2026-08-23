@@ -44,7 +44,7 @@ function format_partitions__950_adsb_bootstrap_partition() {
 	# Wait for the partition device to appear
 	while (( retry_count < max_retries )) && [[ ! -e "${bootstrap_device}" ]]; do
 		sleep 1
-		(( retry_count++ ))
+		retry_count=$(( retry_count + 1 ))
 	done
 	
 	# Check if device exists before formatting
