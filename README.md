@@ -76,7 +76,7 @@ The full Armbian build requires a privileged Docker-capable Linux host with at l
 ./build.sh orangepi-zero3
 ```
 
-GitHub Actions is authoritative. `.github/workflows/validate.yml` runs the cheap gate. `.github/workflows/build-image.yml` is manual and uses the official Armbian Action pinned to `0620eb67885d19aeabd62655e60870ffd1efad63`. Appliance version `2026.08.22.3` is distinct from Armbian's internal version. The workflow injects the exact repository commit, then inspects each completed image with `scripts/inspect-built-image.sh`. Matrix builds upload to one prerelease; a dependent job promotes it only after both targets pass inspection and metadata assembly. Build artifacts include the compressed image, checksum, partition and filesystem evidence, target snapshot, framework and OS revisions, kernel revision, readsb revision, and available Armbian source metadata.
+GitHub Actions is authoritative. `.github/workflows/validate.yml` runs the cheap gate. `.github/workflows/build-image.yml` is manual and uses the official Armbian Action pinned to `0620eb67885d19aeabd62655e60870ffd1efad63`. Appliance version `2026.08.22.4` is distinct from Armbian's internal version. The workflow records the exact repository commit in external build metadata, then inspects each completed image with `scripts/inspect-built-image.sh`. Matrix builds upload to one prerelease; a dependent job promotes it only after both targets pass inspection and metadata assembly. Build artifacts include the compressed image, checksum, partition and filesystem evidence, target snapshot, framework and OS revisions, kernel revision, readsb revision, and available Armbian source metadata.
 
 The partition inspector asserts a root partition, vfat partition 2 labeled `ADSB-BOOT`, the root fstab mount contract, installed release metadata, and absence of persistent configuration, hashes, or PEM files on the FAT volume. Only a successful full Linux image build can prove that resulting disk layout. Repository checks prove the extension and inspection wiring, not the emitted image.
 
@@ -92,13 +92,13 @@ The partition inspector asserts a root partition, vfat partition 2 labeled `ADSB
 Checksum example:
 
 ```fish
-shasum -a 256 -c adsb-receiver-orangepi-zero3-2026.08.22.3.img.xz.sha256
+shasum -a 256 -c adsb-receiver-orangepi-zero3-2026.08.22.4.img.xz.sha256
 ```
 
 Expected result:
 
 ```text
-adsb-receiver-orangepi-zero3-2026.08.22.3.img.xz: OK
+adsb-receiver-orangepi-zero3-2026.08.22.4.img.xz: OK
 ```
 
 If wired Ethernet has a usable DHCP address, Ethernet stays active and the setup file names its HTTPS URL. If Ethernet has no usable address, NetworkManager starts `ADSB-SETUP-<device suffix>` on `192.168.77.0/24`; the fixed gateway and setup URL are `https://192.168.77.1:8443/`. No separate `hostapd`, `dnsmasq`, or unmanaged `wpa_supplicant` configuration is installed.

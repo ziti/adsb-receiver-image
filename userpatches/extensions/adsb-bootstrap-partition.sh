@@ -6,18 +6,6 @@ ADSB_BOOTSTRAP_MIB=128
 ADSB_BOOTSTRAP_LABEL=ADSB-BOOT
 ADSB_BOOTSTRAP_MOUNT=/boot/adsb-bootstrap
 
-function pre_customize_image__950_adsb_repository_provenance() {
-	local commit=unavailable custom_checkout
-	# shellcheck disable=SC2154 # SRC is provided by the Armbian framework.
-	custom_checkout="${SRC}/../custom"
-	if [[ -d ${custom_checkout}/.git ]]; then
-		commit=$(git -C "${custom_checkout}" rev-parse HEAD 2>/dev/null || printf unavailable)
-	fi
-	printf '%s\n' "${commit}" > "${SRC}/userpatches/overlay/etc/adsb-receiver/repository-commit"
-	install -m 0644 "${custom_checkout}/schemas/receiver-config.schema.json" \
-		"${SRC}/userpatches/overlay/usr/share/adsb-receiver/receiver-config.schema.json"
-}
-
 function prepare_image_size__950_adsb_bootstrap_partition() {
 	if [[ ${IMAGE_PARTITION_TABLE:-msdos} != msdos ]]; then
 		display_alert "ADS-B bootstrap partition" "requires an msdos partition table" "err"

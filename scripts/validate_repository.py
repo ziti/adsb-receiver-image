@@ -143,12 +143,15 @@ def validate_bootstrap_partition() -> None:
         "type=0c",
         "LABEL=%s %s vfat rw,nosuid,nodev,noexec,umask=0077",
         "pre_umount_final_image__950_adsb_bootstrap_partition",
-        "pre_customize_image__950_adsb_repository_provenance",
-        'git -C "${custom_checkout}" rev-parse HEAD',
-        "schemas/receiver-config.schema.json",
     ):
         if contract not in text:
             fail(f"bootstrap partition extension is missing contract: {contract}")
+    if '${SRC}/../custom' in text:
+        fail("bootstrap partition extension must not access the action checkout outside Armbian userpatches")
+    canonical_schema = ROOT / "schemas/receiver-config.schema.json"
+    image_schema = ROOT / "userpatches/overlay/usr/share/adsb-receiver/receiver-config.schema.json"
+    if not image_schema.is_file() or image_schema.read_bytes() != canonical_schema.read_bytes():
+        fail("image overlay receiver schema must exactly match schemas/receiver-config.schema.json")
     size = re.search(r"ADSB_BOOTSTRAP_MIB=(\d+)", text)
     if not size or not 64 <= int(size.group(1)) <= 256:
         fail("ADSB-BOOT partition must be 64..256 MiB")
