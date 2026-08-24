@@ -184,6 +184,25 @@ def validate_bootstrap_partition() -> None:
             fail(f"invalid shell syntax in {script.relative_to(ROOT)}: {result.stderr.strip()}")
 
 
+def validate_release_finalizer() -> None:
+    workflow = ROOT / ".github/workflows/build-image.yml"
+    if not workflow.is_file():
+        fail("image build workflow is missing")
+    text = workflow.read_text()
+    for contract in (
+        "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+        "find release-assets -type f -name '*.img.xz'",
+        "find release-assets -type f -name '*.img.xz.sha'",
+        "sha256sum --check --strict",
+        "gh release upload",
+        "published_images",
+    ):
+        if contract not in text:
+            fail(f"release finalizer is missing contract: {contract}")
+    if "images=(release-assets/*.img.xz)" in text or "checksums=(release-assets/*.img.xz.sha)" in text:
+        fail("release finalizer must not assume the artifact extraction root")
+
+
 def validate_customize_build_inputs(build: dict[str, object], targets: dict[str, object]) -> None:
     """Check image inputs that cross Armbian's inner Docker/chroot boundary."""
     inputs = ROOT / "userpatches/overlay/etc/adsb-receiver/build-inputs.sh"
@@ -354,6 +373,7 @@ def main() -> None:
             fail("build manifest must record both Armbian framework and os checkout revisions")
     validate_kernel_pin_extension(targets)
     validate_bootstrap_partition()
+    validate_release_finalizer()
     if (ROOT / ".gitea" / "workflows" / "build-image.yml").exists():
         fail("obsolete Gitea image-build workflow is still enabled")
 

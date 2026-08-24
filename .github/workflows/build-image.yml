@@ -168,8 +168,8 @@ jobs:
         run: |
           set -Eeuo pipefail
           shopt -s nullglob
-          images=(release-assets/*.img.xz)
-          checksums=(release-assets/*.img.xz.sha)
+          mapfile -t images < <(find release-assets -type f -name '*.img.xz' -print | sort)
+          mapfile -t checksums < <(find release-assets -type f -name '*.img.xz.sha' -print | sort)
           test "${#images[@]}" -eq 2 || {
             echo "expected exactly two compressed images, found ${#images[@]}" >&2
             exit 1
@@ -178,7 +178,10 @@ jobs:
             echo "expected exactly two image checksums, found ${#checksums[@]}" >&2
             exit 1
           }
-          sha256sum --check --strict "${checksums[@]}"
+          for checksum in "${checksums[@]}"; do
+            checksum_dir=$(dirname "$checksum")
+            (cd "$checksum_dir" && sha256sum --check --strict "$(basename "$checksum")")
+          done
           gh release view "$IMAGE_VERSION" >/dev/null
           gh release upload "$IMAGE_VERSION" "${images[@]}" "${checksums[@]}" --clobber
           published_images=$(gh release view "$IMAGE_VERSION" --json assets --jq '[.assets[].name | select(endswith(".img.xz"))] | length')
