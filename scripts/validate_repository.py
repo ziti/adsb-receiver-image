@@ -139,11 +139,11 @@ def validate_bootstrap_partition() -> None:
         "ADSB_BOOTSTRAP_LABEL=ADSB-BOOT",
         "ADSB_BOOTSTRAP_MOUNT=/boot/adsb-bootstrap",
         "USE_HOOK_FOR_PARTITION=yes",
-        "partx --add --nr 2 \"${LOOP}\"",
         "mkfs.fat -F 32",
+        "--offset=\"${bootstrap_start}\"",
+        "\"${SDCARD}.raw\" \"${bootstrap_blocks}\"",
         "type=0c",
         "LABEL=%s %s vfat rw,nosuid,nodev,noexec,umask=0077",
-        "pre_umount_final_image__950_adsb_bootstrap_partition",
     ):
         if contract not in text:
             fail(f"bootstrap partition extension is missing contract: {contract}")
@@ -169,11 +169,8 @@ def validate_bootstrap_partition() -> None:
     if not format_hook:
         fail("bootstrap partition extension lacks its post-loop format_partitions hook")
     format_body = format_hook.group("body")
-    if format_body.find("partx --add --nr 2") > format_body.find("mkfs.fat -F 32"):
-        fail("bootstrap partition must add loop partition 2 before formatting ${LOOP}p2")
-    loop_partition_references = re.findall(r"\$\{LOOP\}p2", text)
-    if len(loop_partition_references) != 1 or "${LOOP}p2" not in format_body:
-        fail("bootstrap partition extension must use ${LOOP}p2 exactly once in format_partitions")
+    if "LOOP" in format_body or "partx" in format_body or "mount -o" in format_body:
+        fail("bootstrap partition formatter must not require a second loop-device mapping")
     canonical_schema = ROOT / "schemas/receiver-config.schema.json"
     image_schema = ROOT / "userpatches/overlay/usr/share/adsb-receiver/receiver-config.schema.json"
     if not image_schema.is_file() or image_schema.read_bytes() != canonical_schema.read_bytes():

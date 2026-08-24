@@ -22,7 +22,7 @@ jobs:
       - name: Install validation tools
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends jq shellcheck
+          sudo apt-get install --yes --no-install-recommends dosfstools jq shellcheck
           python -m pip install 'jsonschema==4.25.1'
 
       - name: Validate repository contracts
@@ -30,8 +30,11 @@ jobs:
 
       - name: Check shell scripts
         run: |
-          bash -n build.sh userpatches/customize-image.sh userpatches/extensions/adsb-kernel-pin.sh userpatches/overlay/etc/adsb-receiver/build-inputs.sh
-          shellcheck build.sh userpatches/customize-image.sh userpatches/extensions/adsb-kernel-pin.sh userpatches/overlay/etc/adsb-receiver/build-inputs.sh
+          bash -n build.sh scripts/validate-bootstrap-partition.sh userpatches/customize-image.sh userpatches/extensions/adsb-bootstrap-partition.sh userpatches/extensions/adsb-kernel-pin.sh userpatches/overlay/etc/adsb-receiver/build-inputs.sh
+          shellcheck build.sh scripts/validate-bootstrap-partition.sh userpatches/customize-image.sh userpatches/extensions/adsb-bootstrap-partition.sh userpatches/extensions/adsb-kernel-pin.sh userpatches/overlay/etc/adsb-receiver/build-inputs.sh
+
+      - name: Validate raw ADSB-BOOT formatter without loop partition mappings
+        run: scripts/validate-bootstrap-partition.sh
 
       - name: Run appliance configuration tests
         run: python -m unittest discover -s tests -v
