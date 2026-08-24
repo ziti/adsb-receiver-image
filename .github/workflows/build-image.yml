@@ -154,6 +154,9 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       GH_TOKEN: ${{ github.token }}
+      # This job downloads artifacts only, so gh cannot infer a repository
+      # from a checkout. Keep the release target explicit.
+      GH_REPO: ${{ github.repository }}
       IMAGE_VERSION: ${{ inputs.image_version }}
     steps:
       - name: Download both inspected build artifacts
