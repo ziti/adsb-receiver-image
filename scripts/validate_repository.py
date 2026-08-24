@@ -193,7 +193,8 @@ def validate_release_finalizer() -> None:
         "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
         "find release-assets -type f -name '*.img.xz'",
         "find release-assets -type f -name '*.img.xz.sha'",
-        "sha256sum --check --strict",
+        "expected=$(awk 'NR == 1 { print $1 }' \"$checksum\")",
+        "actual=$(sha256sum \"$image\" | awk '{ print $1 }')",
         "gh release upload",
         "published_images",
     ):

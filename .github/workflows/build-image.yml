@@ -168,8 +168,14 @@ jobs:
         run: |
           set -Eeuo pipefail
           shopt -s nullglob
-          mapfile -t images < <(find release-assets -type f -name '*.img.xz' -print | sort)
-          mapfile -t checksums < <(find release-assets -type f -name '*.img.xz.sha' -print | sort)
+          images=()
+          while IFS= read -r image; do
+            images[${#images[@]}]="$image"
+          done < <(find release-assets -type f -name '*.img.xz' -print | sort)
+          checksums=()
+          while IFS= read -r checksum; do
+            checksums[${#checksums[@]}]="$checksum"
+          done < <(find release-assets -type f -name '*.img.xz.sha' -print | sort)
           test "${#images[@]}" -eq 2 || {
             echo "expected exactly two compressed images, found ${#images[@]}" >&2
             exit 1
@@ -179,8 +185,17 @@ jobs:
             exit 1
           }
           for checksum in "${checksums[@]}"; do
-            checksum_dir=$(dirname "$checksum")
-            (cd "$checksum_dir" && sha256sum --check --strict "$(basename "$checksum")")
+            image="${checksum%.sha}"
+            test -f "$image" || {
+              echo "checksum $checksum has no matching image" >&2
+              exit 1
+            }
+            expected=$(awk 'NR == 1 { print $1 }' "$checksum")
+            actual=$(sha256sum "$image" | awk '{ print $1 }')
+            test "$expected" = "$actual" || {
+              echo "checksum mismatch for $image" >&2
+              exit 1
+            }
           done
           gh release view "$IMAGE_VERSION" >/dev/null
           gh release upload "$IMAGE_VERSION" "${images[@]}" "${checksums[@]}" --clobber
