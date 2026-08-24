@@ -37,37 +37,27 @@ function create_partition_table__950_adsb_bootstrap_partition() {
 }
 
 function format_partitions__950_adsb_bootstrap_partition() {
-	local bootstrap_device="${LOOP}p2"
-	local retry_count=0
-	local max_retries=5
-	
-	# Wait for the partition device to appear
-	while (( retry_count < max_retries )) && [[ ! -e "${bootstrap_device}" ]]; do
-		sleep 1
-		retry_count=$(( retry_count + 1 ))
-	done
-	
-	# Check if device exists before formatting
-	if [[ ! -e "${bootstrap_device}" ]]; then
-		display_alert "ADS-B bootstrap partition" "device ${bootstrap_device} not found after ${max_retries} attempts" "err"
+	local bootstrap_blocks bootstrap_sectors bootstrap_start total_sectors
+	bootstrap_sectors=$(( ADSB_BOOTSTRAP_MIB * 1024 * 1024 / SECTOR_SIZE ))
+	bootstrap_blocks=$(( ADSB_BOOTSTRAP_MIB * 1024 ))
+	# sdsize is dynamically scoped by Armbian's prepare_partitions function.
+	total_sectors=$(( sdsize * 1024 * 1024 / SECTOR_SIZE ))
+	bootstrap_start=$(( total_sectors - bootstrap_sectors ))
+	if (( bootstrap_start <= 0 )); then
+		display_alert "ADS-B bootstrap partition" "calculated FAT offset is invalid" "err"
 		return 1
 	fi
-	
-	if ! mkfs.fat -F 32 -n "${ADSB_BOOTSTRAP_LABEL}" "${bootstrap_device}"; then
-		display_alert "ADS-B bootstrap partition" "failed to format ${bootstrap_device}" "err"
+
+	# GitHub's nested Armbian container exposes only loop0p1 and rejects an
+	# additional loop mapping.  Partition 2 already exists in ${SDCARD}.raw;
+	# format that exact bounded region directly, without touching a loop device.
+	if ! mkfs.fat -F 32 -n "${ADSB_BOOTSTRAP_LABEL}" --offset="${bootstrap_start}" \
+		"${SDCARD}.raw" "${bootstrap_blocks}"; then
+		display_alert "ADS-B bootstrap partition" "failed to format partition 2 at sector ${bootstrap_start}" "err"
 		return 1
 	fi
-	
+
 	install -d -m 0755 "${MOUNT}${ADSB_BOOTSTRAP_MOUNT}"
-	if ! mount -o rw,nosuid,nodev,noexec,umask=0077 "${bootstrap_device}" "${MOUNT}${ADSB_BOOTSTRAP_MOUNT}"; then
-		display_alert "ADS-B bootstrap partition" "failed to mount ${bootstrap_device}" "err"
-		return 1
-	fi
-	
 	printf 'LABEL=%s %s vfat rw,nosuid,nodev,noexec,umask=0077,x-systemd.device-timeout=10s 0 2\n' \
 		"${ADSB_BOOTSTRAP_LABEL}" "${ADSB_BOOTSTRAP_MOUNT}" >> "${SDCARD}/etc/fstab"
-}
-
-function pre_umount_final_image__950_adsb_bootstrap_partition() {
-	umount "${MOUNT}${ADSB_BOOTSTRAP_MOUNT}" 2>/dev/null || true
 }

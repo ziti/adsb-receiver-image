@@ -140,9 +140,10 @@ def validate_bootstrap_partition() -> None:
         "ADSB_BOOTSTRAP_MOUNT=/boot/adsb-bootstrap",
         "USE_HOOK_FOR_PARTITION=yes",
         "mkfs.fat -F 32",
+        "--offset=\"${bootstrap_start}\"",
+        "\"${SDCARD}.raw\" \"${bootstrap_blocks}\"",
         "type=0c",
         "LABEL=%s %s vfat rw,nosuid,nodev,noexec,umask=0077",
-        "pre_umount_final_image__950_adsb_bootstrap_partition",
     ):
         if contract not in text:
             fail(f"bootstrap partition extension is missing contract: {contract}")
@@ -167,9 +168,9 @@ def validate_bootstrap_partition() -> None:
     )
     if not format_hook:
         fail("bootstrap partition extension lacks its post-loop format_partitions hook")
-    loop_partition_references = re.findall(r"\$\{LOOP\}p2", text)
-    if len(loop_partition_references) != 1 or "${LOOP}p2" not in format_hook.group("body"):
-        fail("bootstrap partition extension must use ${LOOP}p2 exactly once in format_partitions")
+    format_body = format_hook.group("body")
+    if "LOOP" in format_body or "partx" in format_body or "mount -o" in format_body:
+        fail("bootstrap partition formatter must not require a second loop-device mapping")
     canonical_schema = ROOT / "schemas/receiver-config.schema.json"
     image_schema = ROOT / "userpatches/overlay/usr/share/adsb-receiver/receiver-config.schema.json"
     if not image_schema.is_file() or image_schema.read_bytes() != canonical_schema.read_bytes():
@@ -181,6 +182,26 @@ def validate_bootstrap_partition() -> None:
         result = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
         if result.returncode:
             fail(f"invalid shell syntax in {script.relative_to(ROOT)}: {result.stderr.strip()}")
+
+
+def validate_release_finalizer() -> None:
+    workflow = ROOT / ".github/workflows/build-image.yml"
+    if not workflow.is_file():
+        fail("image build workflow is missing")
+    text = workflow.read_text()
+    for contract in (
+        "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+        "find release-assets -type f -name '*.img.xz'",
+        "find release-assets -type f -name '*.img.xz.sha'",
+        "expected=$(awk 'NR == 1 { print $1 }' \"$checksum\")",
+        "actual=$(sha256sum \"$image\" | awk '{ print $1 }')",
+        "gh release upload",
+        "published_images",
+    ):
+        if contract not in text:
+            fail(f"release finalizer is missing contract: {contract}")
+    if "images=(release-assets/*.img.xz)" in text or "checksums=(release-assets/*.img.xz.sha)" in text:
+        fail("release finalizer must not assume the artifact extraction root")
 
 
 def validate_customize_build_inputs(build: dict[str, object], targets: dict[str, object]) -> None:
@@ -353,6 +374,7 @@ def main() -> None:
             fail("build manifest must record both Armbian framework and os checkout revisions")
     validate_kernel_pin_extension(targets)
     validate_bootstrap_partition()
+    validate_release_finalizer()
     if (ROOT / ".gitea" / "workflows" / "build-image.yml").exists():
         fail("obsolete Gitea image-build workflow is still enabled")
 

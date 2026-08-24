@@ -156,5 +156,52 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       IMAGE_VERSION: ${{ inputs.image_version }}
     steps:
-      - name: Promote shared prerelease after every target passes
-        run: gh release edit "$IMAGE_VERSION" --prerelease=false --latest
+      - name: Download both inspected build artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: adsb-receiver-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify and publish exactly two inspected images
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          shopt -s nullglob
+          images=()
+          while IFS= read -r image; do
+            images[${#images[@]}]="$image"
+          done < <(find release-assets -type f -name '*.img.xz' -print | sort)
+          checksums=()
+          while IFS= read -r checksum; do
+            checksums[${#checksums[@]}]="$checksum"
+          done < <(find release-assets -type f -name '*.img.xz.sha' -print | sort)
+          test "${#images[@]}" -eq 2 || {
+            echo "expected exactly two compressed images, found ${#images[@]}" >&2
+            exit 1
+          }
+          test "${#checksums[@]}" -eq 2 || {
+            echo "expected exactly two image checksums, found ${#checksums[@]}" >&2
+            exit 1
+          }
+          for checksum in "${checksums[@]}"; do
+            image="${checksum%.sha}"
+            test -f "$image" || {
+              echo "checksum $checksum has no matching image" >&2
+              exit 1
+            }
+            expected=$(awk 'NR == 1 { print $1 }' "$checksum")
+            actual=$(sha256sum "$image" | awk '{ print $1 }')
+            test "$expected" = "$actual" || {
+              echo "checksum mismatch for $image" >&2
+              exit 1
+            }
+          done
+          gh release view "$IMAGE_VERSION" >/dev/null
+          gh release upload "$IMAGE_VERSION" "${images[@]}" "${checksums[@]}" --clobber
+          published_images=$(gh release view "$IMAGE_VERSION" --json assets --jq '[.assets[].name | select(endswith(".img.xz"))] | length')
+          test "$published_images" -eq 2 || {
+            echo "release $IMAGE_VERSION does not contain exactly two compressed images" >&2
+            exit 1
+          }
+          gh release edit "$IMAGE_VERSION" --prerelease=false --latest
