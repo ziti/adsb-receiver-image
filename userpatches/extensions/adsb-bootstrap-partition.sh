@@ -39,9 +39,18 @@ function create_partition_table__950_adsb_bootstrap_partition() {
 function format_partitions__950_adsb_bootstrap_partition() {
 	local bootstrap_device="${LOOP}p2"
 	local retry_count=0
-	local max_retries=5
-	
-	# Wait for the partition device to appear
+	local max_retries=15
+
+	# Armbian attaches the loop device with --partscan after this extension
+	# creates the table.  In GitHub's nested Docker environment that scan can
+	# expose p1 but omit p2.  Tell the kernel to add the known second mapping;
+	# merely sleeping cannot create a missing loop partition device.
+	if [[ ! -e "${bootstrap_device}" ]] && ! partx --add --nr 2 "${LOOP}"; then
+		display_alert "ADS-B bootstrap partition" "failed to add partition 2 for ${LOOP}" "err"
+		return 1
+	fi
+
+	# udev may still need a moment to materialize the partition node.
 	while (( retry_count < max_retries )) && [[ ! -e "${bootstrap_device}" ]]; do
 		sleep 1
 		retry_count=$(( retry_count + 1 ))
