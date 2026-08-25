@@ -139,7 +139,7 @@ def validate_bootstrap_partition() -> None:
         "ADSB_BOOTSTRAP_LABEL=ADSB-BOOT",
         "ADSB_BOOTSTRAP_MOUNT=/boot/adsb-bootstrap",
         "USE_HOOK_FOR_PARTITION=yes",
-        "mkfs.fat -F 32",
+        "mkfs.fat -F 32 -s 1",
         "--offset=\"${bootstrap_start}\"",
         "\"${SDCARD}.raw\" \"${bootstrap_blocks}\"",
         "type=0c",
