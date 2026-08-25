@@ -51,7 +51,11 @@ function format_partitions__950_adsb_bootstrap_partition() {
 	# GitHub's nested Armbian container exposes only loop0p1 and rejects an
 	# additional loop mapping.  Partition 2 already exists in ${SDCARD}.raw;
 	# format that exact bounded region directly, without touching a loop device.
-	if ! mkfs.fat -F 32 -n "${ADSB_BOOTSTRAP_LABEL}" --offset="${bootstrap_start}" \
+	# A 128 MiB FAT32 volume needs 512-byte clusters.  dosfstools otherwise
+	# selects 4 KiB clusters, leaving fewer than FAT32's required 65,525 data
+	# clusters.  Linux accepts that hybrid geometry, but macOS identifies it as
+	# FAT16 and cannot mount the FAT32 metadata.
+	if ! mkfs.fat -F 32 -s 1 -n "${ADSB_BOOTSTRAP_LABEL}" --offset="${bootstrap_start}" \
 		"${SDCARD}.raw" "${bootstrap_blocks}"; then
 		display_alert "ADS-B bootstrap partition" "failed to format partition 2 at sector ${bootstrap_start}" "err"
 		return 1

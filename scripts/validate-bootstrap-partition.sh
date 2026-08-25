@@ -26,7 +26,10 @@ unit: sectors
 start=${root_start}, size=${root_sectors}, type=83
 start=${bootstrap_start}, size=${bootstrap_sectors}, type=0c
 EOF
-mkfs.fat -F 32 -n ADSB-BOOT --offset="$bootstrap_start" "$image" "$bootstrap_blocks"
+mkfs.fat -F 32 -s 1 -n ADSB-BOOT --offset="$bootstrap_start" "$image" "$bootstrap_blocks"
 dd if="$image" of="$partition" bs="$sector_size" skip="$bootstrap_start" count="$bootstrap_sectors" status=none
 fsck.fat -n "$partition"
 test "$(fatlabel "$partition")" = ADSB-BOOT
+# FAT32 requires at least 65,525 clusters.  With a 128 MiB partition, a
+# 512-byte sector-per-cluster value keeps the geometry valid for macOS too.
+test "$(od -An -tu1 -j 13 -N 1 "$partition" | tr -d '[:space:]')" = 1
